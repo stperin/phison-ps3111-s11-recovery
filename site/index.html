@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One bit in RAM: repairing a "SATAFIRM S11" SSD</title>
+<meta name="description" content="A Phison PS3111-S11 SSD reporting SATAFIRM S11 was not bricked. The entire fault was one bit in a RAM flag, set at every boot by a single NAND page. Erasing one block fixed it, with all data intact.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="One bit in RAM: repairing a &quot;SATAFIRM S11&quot; SSD">
+<meta property="og:description" content="The entire fault was one bit in a RAM flag, set at every boot by a single NAND page. Erasing one block fixed it, with all data intact.">
+<meta property="og:type" content="article">
+<style>
+  :root {
+    --bg: #fdfdfc; --fg: #1a1a18; --dim: #5e5e58; --rule: #e2e0da;
+    --code-bg: #f4f2ed; --accent: #8a3200; --mark: #fdf3d0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --fg: #ddddd8; --dim: #92928c; --rule: #2d2f33;
+      --code-bg: #1e2024; --accent: #e8915c; --mark: #3a3418;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 17px/1.65 ui-serif, Charter, "Iowan Old Style", Georgia, serif;
+    padding: 0 1.25rem 6rem;
+  }
+  main { max-width: 41rem; margin: 0 auto; }
+  header { margin: 3.5rem 0 3rem; }
+  h1 {
+    font-size: clamp(1.7rem, 5vw, 2.4rem); line-height: 1.15;
+    letter-spacing: -0.015em; margin: 0 0 .9rem; font-weight: 600;
+  }
+  .standfirst { font-size: 1.1rem; color: var(--dim); margin: 0 0 1.2rem; }
+  .meta {
+    font: 13px/1.5 ui-sans-serif, system-ui, sans-serif;
+    color: var(--dim); text-transform: uppercase; letter-spacing: .06em;
+  }
+  h2 {
+    font-size: 1.3rem; font-weight: 600; letter-spacing: -0.01em;
+    margin: 3rem 0 .8rem; padding-top: 1.4rem; border-top: 1px solid var(--rule);
+  }
+  h3 { font-size: 1.05rem; font-weight: 600; margin: 2rem 0 .5rem; }
+  p { margin: 0 0 1.1rem; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  code, pre, kbd {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: .86em;
+  }
+  code { background: var(--code-bg); padding: .1em .3em; border-radius: 3px; }
+  pre {
+    background: var(--code-bg); padding: .9rem 1rem; border-radius: 5px;
+    overflow-x: auto; line-height: 1.5; margin: 0 0 1.2rem;
+    border: 1px solid var(--rule);
+  }
+  pre code { background: none; padding: 0; }
+  blockquote {
+    margin: 0 0 1.2rem; padding: .1rem 0 .1rem 1.1rem;
+    border-left: 3px solid var(--rule); color: var(--dim);
+  }
+  table {
+    width: 100%; border-collapse: collapse; margin: 0 0 1.4rem;
+    font: 14px/1.5 ui-sans-serif, system-ui, sans-serif;
+  }
+  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  td code { font-size: .95em; }
+  .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  ul, ol { margin: 0 0 1.2rem; padding-left: 1.4rem; }
+  li { margin-bottom: .4rem; }
+  mark { background: var(--mark); color: inherit; padding: .05em .15em; }
+  .note {
+    font: 15px/1.6 ui-sans-serif, system-ui, sans-serif;
+    background: var(--code-bg); border: 1px solid var(--rule);
+    border-radius: 5px; padding: 1rem 1.1rem; margin: 0 0 1.4rem;
+  }
+  .note p:last-child { margin-bottom: 0; }
+  .note strong { color: var(--fg); }
+  footer {
+    margin-top: 3.5rem; padding-top: 1.4rem; border-top: 1px solid var(--rule);
+    font: 14px/1.6 ui-sans-serif, system-ui, sans-serif; color: var(--dim);
+  }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>One bit in RAM</h1>
+  <p class="standfirst">A 120&nbsp;GB SSD reported itself as <code>SATAFIRM S11</code> and served nothing but zeros. Every guide on the internet said to reflash it, which would have destroyed the data. The entire fault was one bit in a RAM flag, set at every boot because of a single page on the NAND.</p>
+  <p class="meta">Phison PS3111-S11 &middot; firmware SBFM21.1 &middot; 2026</p>
+</header>
+
+<p>The drive was a Silicon Power M56, 120&nbsp;GB, M.2 SATA, with a Phison PS3111-S11 controller and no DRAM. It had been working, and then it had not. What the host saw was this:</p>
+
+<pre><code>Model Number:       SATAFIRM   S11
+Firmware Revision:  SBFM21W1</code></pre>
+
+<p>That is not the drive's model. It is not even a real firmware version. <code>dd</code> read 120&nbsp;GB of zeros from it without a single I/O error. The partition table was gone, the filesystem was gone, and <code>smartctl</code> made the machine hang during boot at a consistent 98.64 seconds, with <code>hardreset failed</code> and <code>ata3.00: disable device</code>.</p>
+
+<p>Search for <code>SATAFIRM S11</code> and the answer you get, everywhere, is: download Phison's MPTool, pick the matching flash-ID configuration, and reinitialise the controller. This works. It also wipes the flash translation layer and, with it, every byte of your data, permanently. The forum posts say so in passing, usually after the person has already done it.</p>
+
+<p>I wanted the data. So instead of reflashing, I spent a while finding out what <code>SATAFIRM S11</code> actually <em>is</em>.</p>
+
+<p>It is this: a byte at address <code>0x5C0CB5F0</code> in the controller's RAM. If that byte is non-zero, the firmware's <code>IDENTIFY</code> handler reports <code>SATAFIRM S11</code> instead of the real model. The byte was <code>0x04</code> — <mark>one bit set</mark> — and the bit was set at every boot by the firmware's own startup scan, which had found one bad page in the system area and remembered it. Erasing the block that held that page ended the condition permanently. The drive came back as <code>SPCC M.2 SSD</code> / <code>SBFM21.1</code>, mounted its NTFS volume, and a full image taken from it boots Windows to the desktop.</p>
+
+<p>Getting there took three weeks, two serious wrong turns, and a 105&nbsp;GB raw dump that I did not end up needing. The wrong turns are the interesting part, so they are in here too.</p>
+
+<h2>Standing on Psychite</h2>
+
+<p>None of this would have been possible without <a href="https://github.com/trulycrisp/psychite">Psychite</a> by trulycrisp, and the accompanying writeup <a href="https://trulycrisp.github.io/drivefirmware/phison_s11/">Drive Firmware Security – Phison S11</a>. That project worked out the genuinely hard part: the vendor-unique command (VUC) transport that gets you past the standard ATA command set and into the controller, the command set itself, and the firmware container format.</p>
+
+<p>With Psychite you can, over an ordinary SATA cable, on a drive that is refusing to serve data:</p>
+
+<ul>
+  <li>read and write the controller's RAM;</li>
+  <li>read raw NAND pages, with their out-of-band (OOB) spare bytes;</li>
+  <li>erase a NAND block;</li>
+  <li>soft-reset the controller so that firmware init runs again;</li>
+  <li>pull and decrypt the firmware image.</li>
+</ul>
+
+<p>That is a debugger attached to a dead disk. Everything below is just using it.</p>
+
+<h2>Act one: 105 GB of nothing</h2>
+
+<p>My first instinct was the obvious one — forget the controller, read the flash directly and rebuild the volume from the raw pages. The OOB bytes on each page carry the LBA of the data in it, so in principle you can sort 8768 blocks of pages into a disk image and mount the result.</p>
+
+<p>I dumped the whole chip. 105&nbsp;GB, zero read errors, which was already informative: nothing was physically wrong with this NAND. Then I spent a long time failing to turn it into a filesystem, for two reasons that both turned out to be my own.</p>
+
+<h3>The CE encoding was wrong</h3>
+
+<p>The chip has four chip-enables. Psychite selects one by the bit position within the controller's <code>ce_bitmap</code>, which gives 0, 4, 8, 12. Two of those four values silently do the wrong thing: they re-read CE0 and CE1 at page+2 instead of selecting CE1 and CE3. The OOB carries a CE id, so this is checkable, and once checked the real encoding falls out:</p>
+
+<pre><code>ce_raw = (((address &gt;&gt; 2) &amp; 1) &lt;&lt; 3) | ((address &gt;&gt; 3) &amp; 1)   # 0-&gt;0, 4-&gt;8, 8-&gt;1, 12-&gt;9</code></pre>
+
+<h3>The read mode was wrong, and this one hid the fault</h3>
+
+<p>This controller uses some blocks in pSLC mode (one bit per cell, 512 pages per block) and the rest in MLC (two bits, 1024 pages). You have to ask for the right one. <mark>A pSLC block read in MLC mode does not return garbage — it returns what looks like an erased block.</mark></p>
+
+<p>So my dump quietly classified <strong>4662 of 8768 blocks as empty</strong>. They were not empty. They held 38&nbsp;GB of user data, the entire firmware system area, and — as it turned out — the one page that was causing the whole problem. The same mistake also produced a phantom symptom I believed for days: "the controller hangs when you read system blocks." It does not. It hangs when you read a pSLC system block in MLC mode.</p>
+
+<p>The fix for both was the same, and it is the single most useful habit I took from this: <strong>the OOB contains a physical page index.</strong> Read a block, check that the page index in the spare bytes matches the order you read them in. If it does not, your addressing or your mode is wrong, and everything you conclude from here is fiction.</p>
+
+<h2>Act two: reading the firmware</h2>
+
+<p>Meanwhile I pulled the firmware and opened it in Ghidra. The PS3111-S11 runs a little-endian Xtensa core; Ghidra handles it. The one thing you must do is load the sections at their runtime addresses, or every absolute reference is meaningless:</p>
+
+<table>
+  <tr><th>Section</th><th>Load address</th></tr>
+  <tr><td><code>sec0</code></td><td><code>0x5C0E0000</code></td></tr>
+  <tr><td><code>sec1</code></td><td><code>0x5C0C8000</code></td></tr>
+  <tr><td><code>sec2</code></td><td><code>0x60000400</code></td></tr>
+</table>
+
+<p>From there it is a short walk. <code>FUN_60004c4c</code> builds the <code>IDENTIFY</code> response. It reports the real model and firmware version unless the byte at <code>0x5C0CB5F0</code> is non-zero, in which case it substitutes the <code>SATAFIRM S11</code> / <code>SBFM21W1</code> strings.</p>
+
+<p>The byte is not a flag. It is a bitfield of <em>reasons</em>, and each bit has a different setter:</p>
+
+<table>
+  <tr><th>Bit</th><th>Set by</th><th>Meaning</th></tr>
+  <tr><td class="num">0</td><td><code>FUN_6003bde8</code></td><td>NAND context word at <code>+0xfec</code> non-zero</td></tr>
+  <tr><td class="num">1</td><td><code>FUN_60056864</code></td><td>Hardware pin / register (<code>reg+0x31c</code> bit 9), polarity from config</td></tr>
+  <tr><td class="num">2</td><td><code>FUN_60016c4c</code></td><td><strong>System-area scan found an <code>ERROR_UNIT</code> page</strong></td></tr>
+  <tr><td class="num">3</td><td>—</td><td>Read together with bit 2 by <code>FUN_6000892c</code>; setter never located</td></tr>
+</table>
+
+<p>This is the part I would most like other people to know, because it changes what you do next. <strong><code>SATAFIRM S11</code> is not one failure mode. It is at least four, and the controller will tell you which one you have, over read-only commands, in about a second.</strong> Every variable that scan writes stays in RAM and can be read without writing anything:</p>
+
+<pre><code>$ sudo safe_dump.py /dev/sgX diag-protect
+IDENTIFY model='SATAFIRM   S11' firmware='SBFM21W1'
+0x5c0cb5f0 [1] 04        protect flag: bit 2, and nothing else
+0x5c0ceaac [1] 03        error unit at firmware block 3
+0x5c0ce6da [1] 05        system unit header found
+0x5c0ce6db [1] 07        block map found
+0x5c0ce9ab [1] 08        scan covers firmware blocks 0..7</code></pre>
+
+<p>Exactly one reason bit. And both pieces of FTL metadata — the system unit header and the block map — were <em>found</em>, which means the translation layer was intact. The drive knew where all my data was. It had simply decided not to tell me.</p>
+
+<h3>The trap: clearing the flag is not a repair</h3>
+
+<p>You can write zero to <code>0x5C0CB5F0</code>. It takes one command, and <code>IDENTIFY</code> changes to the real model <em>immediately</em>, with no reset. For about a minute this feels like the fix.</p>
+
+<p>It is not. <code>dd</code> still reads zeros. The flag is the symptom; by the time you clear it, every boot-time decision gated on bit 2 has already been taken. Nor does a reset help by itself — it reloads the firmware from NAND, re-runs the scan, finds the same page, and sets the same bit. The only sequence that works is: <strong>remove the cause on the NAND, then reset so that init runs again and reaches a different conclusion.</strong></p>
+
+<p>I also tried to be clever and failed twice, which is worth recording:</p>
+
+<ul>
+  <li><strong>Patch out the store instruction</strong> at <code>0x60017003</code> that sets the bit. <code>WRITE_REGISTER</code> cannot write the SRAM code region at <code>0x6001xxxx</code> — it works at <code>0x5C0Cxxxx</code> only, and the write fails silently. Dead end.</li>
+  <li><strong>Inject a loader via <code>DOWNLOAD MICROCODE</code></strong>, either as a firmware update or with the engineering-mode header. Rejected in protect mode: ABORT, error 4, status <code>0x71</code>. You cannot flash your way in while the drive is in this state.</li>
+</ul>
+
+<h2>Act three: the page that did it</h2>
+
+<p><code>FUN_60016c4c</code> is the system-area mount routine. It walks blocks in ascending order on each CE, reads page 0, and classifies it by the first 32-bit word of the OOB:</p>
+
+<pre><code>value = *(u32 *)(0x50001200 + slot * 0x100);
+
+if ((~value &amp; 0xFFD00000) == 0) {        /* ERROR_UNIT: a MASK test, not equality */
+    *(u8 *)0x5C0CEAAC = block;           /* remember where */
+    *(u8 *)0x5C0CB5F0 |= 4;              /* protect mode */
+    break;
+}
+if (value == 0xFFA00000) { /* SYSTEM_UNIT_HEADER */ }
+if (value == 0x3FB10200) { /* BLOCK_MAP        */ }</code></pre>
+
+<p>Two details in there matter more than they look.</p>
+
+<p><strong>The error-unit test is a mask, not a comparison.</strong> <code>(~value &amp; 0xFFD00000) == 0</code> means "every bit of <code>0xFFD00000</code> is present." <code>0xFFFFFFFF</code> satisfies it too — so on a read path where an erased page presents as all-ones, an <em>erased</em> block would trip the check. On this drive erased pages read back as <code>0x00000000</code> through the VUC path, which is the only reason the obvious repair works at all. If you do this and the erased page comes back <code>0xffffffff</code>, stop: you have just made the trigger permanent.</p>
+
+<p><strong>The scan does not abort on finding it.</strong> It sets the bit and keeps going, and returns success as long as it finds a header and a block map. That is why a drive can be in protect mode with a perfectly healthy FTL. Bit 2 alone is enough to lock you out of data that the controller can still address.</p>
+
+<p>And one piece of arithmetic that cost me several days: <strong>firmware block numbers are physical blocks ÷ 4.</strong> When the firmware says "block 3", the block you have to erase is physical block 12. A firmware block is four internal units, and the OOB CE-id field confirms the grouping. Nothing says so anywhere; you find it by noticing that a RAM variable and your dump disagree by a factor of four.</p>
+
+<h3>What was actually in the error unit</h3>
+
+<p>Having finally found it — 53 written pages out of 512, one block on each of CE0 and CE1 — I dumped it. It is a crash log, and it is unusually talkative. The sub-type is tagged in the second OOB word:</p>
+
+<table>
+  <tr><th>Tag</th><th class="num">Pages</th><th>Contents</th></tr>
+  <tr><td><code>0x111111</code></td><td class="num">1</td><td>Configuration record, starts <code>49 44 aa 00</code> ("ID") — NAND geometry and timings</td></tr>
+  <tr><td><code>0x222222</code></td><td class="num">2</td><td>101 records of 0x58 bytes: copies of the NAND command descriptor</td></tr>
+  <tr><td><code>0x555555</code></td><td class="num">36</td><td>Zero-filled, reserved</td></tr>
+  <tr><td><code>0x666666</code></td><td class="num">14</td><td>176&nbsp;KB of the firmware's own <code>sec2</code>, as it stood in SRAM</td></tr>
+</table>
+
+<p>The 101 descriptor records hold a fixed command (<code>0x00440021</code>), an index climbing from <code>0x1b</code> to <code>0x7f</code>, and two linear ramps with steps of <code>0x40</code> and <code>2</code>. Fixed command, parameters stepping regularly, 101 times: that is a <strong>read-retry sweep</strong>. The firmware was retrying a read with shifted reference voltages. It gave up after 101 attempts, wrote a crash log, dumped its own code section into it, and left behind the page that would greet it at every subsequent boot.</p>
+
+<p>The <code>0x666666</code> pages paid for themselves twice. First, they match my decrypted firmware image <em>byte for byte</em>, which validates the extraction — and, more usefully, settles a question. Commercial data-recovery vendors describe the PS3111-S11 as applying XOR scrambling to NAND writes. Whatever happens at the cell level, the VUC read path returns plaintext: here is 176&nbsp;KB of known content, read back through that path, unscrambled. <strong>There is no XOR key to extract on this path.</strong> (Nearly everything findable about this controller's data format comes from one vendor's marketing pages, which contradict each other — a key derived from model and chip ID in one place, a two-layer "dynamic XOR" in another.)</p>
+
+<p>Second, the variable region of those pages is a snapshot of controller state at the instant of the panic:</p>
+
+<pre><code>0x6005CD00 = 05 ff ff ff ff ff | 07 ff</code></pre>
+
+<p>System unit header at block 5, block map at block 7. The mount had <em>succeeded</em> when the failure hit. Whatever went wrong, it was not a corrupt system area.</p>
+
+<h2>The dead end I want to tell you about</h2>
+
+<p>Running in parallel with all this was my attempt to rebuild the volume from the raw dump. It produced the most instructive failure of the project, and it had nothing to do with the hardware.</p>
+
+<p>A large fraction of frames, read as the 4&nbsp;KB of their declared LBA, contained high-entropy data with a recurring 8-byte prefix. Obviously encrypted, then. So I went looking for the encoding. Everything in this table was measured:</p>
+
+<table>
+  <tr><th>Hypothesis</th><th>Result</th></tr>
+  <tr><td>XOR with a key, aligned to known plaintext</td><td>XOR of plaintext and ciphertext has entropy <strong>7.36</strong></td></tr>
+  <tr><td>Short repeating key (Vigenère)</td><td>Index of coincidence peaks at every multiple of 3 (L=3 → 0.0179 vs 0.0039 uniform), but the modal key per class (<code>0ffcc0</code>) yields neither zeros nor <code>FILE</code></td></tr>
+  <tr><td>Bit reordering: even/odd bits, 2-bit pairs, 12-bit symbols, Gray decode, nibble swap, bit reversal</td><td>Entropy stays 7.17–7.32 in all six</td></tr>
+  <tr><td>Bit-level misalignment</td><td>No <code>FILE</code> at any of 8 shifts, either direction, nor bit-reversed</td></tr>
+  <tr><td>Already-compressed data</td><td>zlib still reduces it to 69%; an ordinary frame to 78%</td></tr>
+  <tr><td>Scrambling tables in the firmware</td><td>The recurring patterns appear nowhere in <code>sec0/1/2</code></td></tr>
+  <tr><td>Wrong read mode</td><td>OOB page index matches read order on every block tested, both modes</td></tr>
+  <tr><td>Uncorrectable ECC</td><td>Same distribution of corrected bits as ordinary pages</td></tr>
+</table>
+
+<p>I also built two "fingerprints" of the mystery format. Both were artefacts, and I am recording them so nobody reuses them:</p>
+
+<ul>
+  <li><strong>Bytes concentrated on 2-bit-aligned masks</strong> (<code>fc</code>, <code>c0</code>, <code>0f</code>, <code>03</code>). Measured: 66.6% of adjacent bit pairs equal, 26.8% of bytes with all pairs equal — against <strong>66.4% and 33.6% in an ordinary data frame</strong>. It is a property of binary data in general.</li>
+  <li><strong>A dominant 3-byte period.</strong> An ordinary frame containing plain x86-64 code scores 0.189 at distance 3. A filter I built on that threshold duly selected x86 code: one of my "mystery candidates" began <code>48 89 54 24 30</code>, which is <code>mov [rsp+0x30], rdx</code>.</li>
+</ul>
+
+<p>Here is what was actually going on. Bit 0 of byte 8 of an OOB frame entry marks a <strong>partial frame</strong> — a frame that does not hold the full 4&nbsp;KB of its declared LBA. Across 263 sampled versions, a frame with that bit set <em>never</em> held the complete 4&nbsp;KB. Reading those frames as if they did means comparing unrelated bytes. There was no cipher. I was computing entropy on misalignment.</p>
+
+<blockquote>
+<p>The hypothesis survived as long as it did because of how I was testing it. Each negative result — not XOR, not a reordering, not compressed — got read as "then it is a <em>more complicated</em> encoding" rather than as evidence against the premise. A chain of exclusions that narrows forever without ever questioning the set it started from.</p>
+</blockquote>
+
+<p>What broke it was not a cleverer analysis. It was that <strong>the drive got fixed, and became an oracle I could query.</strong> I took 60 LBAs from the dump, read them from the repaired device, and compared them against every version of them in the dump:</p>
+
+<table>
+  <tr><th>Outcome</th><th class="num">n</th></tr>
+  <tr><td>A version matches byte for byte, at exactly the expected frame offset</td><td class="num">16</td></tr>
+  <tr><td>The drive now reads all zeros (LBA deallocated; the dump holds stale data)</td><td class="num">18</td></tr>
+  <tr><td>No version matches</td><td class="num">26</td></tr>
+</table>
+
+<p>The 16 matches land at offset 0 with no shift, which proves the LBA decoding was right all along. Correlating OOB byte 8 against those three outcomes produced the partial-frame flag in an afternoon, and with it the explanation for every failed test above. The placement rule followed:</p>
+
+<pre><code>n     = run length of the bits equal to bit 0 of byte 9, starting at bit 0
+shift = 8 - n
+frame[0 .. n*512) == device sectors [LBA + shift, LBA + 8)</code></pre>
+
+<p>Verified against the repaired drive by content hash: 60 of 60.</p>
+
+<p>Three weeks of statistics, settled in an afternoon by having one known-good copy of the thing. That is the transferable lesson of this whole project, and it is embarrassingly simple: <strong>every high-value result came from checking an assumption against something already known</strong> — the read mode against the OOB page index, the ÷4 factor against a RAM variable, the partial-frame flag against the repaired drive. <strong>Every dead end came from looking for structure in statistics with no reference.</strong></p>
+
+<h2>The repair</h2>
+
+<p>By this point the decision was fully determined by static analysis rather than by trial and error, which is the only reason I was willing to erase anything. One reason bit, both metadata blocks present, the error unit's location in a RAM variable, and the firmware's own classification rules reproduced in a script so I could see the page for myself.</p>
+
+<p>Erasing a NAND block is irreversible, so the tool refuses unless three things hold: the target page carries the <code>ERROR_UNIT</code> magic <em>read through the same addressing the erase will use</em>, a local backup of the block exists and matches, and <code>--yes</code> is given. One block per CE — the scan reads them all, and one survivor re-sets the bit.</p>
+
+<pre><code>page 0 word0 = 0xffd00000 (ERROR_UNIT)
+  backup: ... word0 matches
+  ERASE done
+  after: word0 = 0x00000000 (LBA 0x0), OOB byte8 = 0xff</code></pre>
+
+<p>Then the soft reset, so init runs again. An S3 suspend is not enough — that is a COMRESET, and the scan runs on <em>controller</em> reset:</p>
+
+<pre><code>before: flag=04, IDENTIFY model='SATAFIRM   S11'
+0x5c0cb5f0 [1] 00   flag = 0x00: no bits set
+0x5c0ceaac [1] ff   error unit block -> NONE
+after:  IDENTIFY model='SPCC M.2 SSD' firmware='SBFM21.1'</code></pre>
+
+<p>The line that matters is <code>0x5c0ceaac = ff</code>. The flag is zero because init re-ran and found nothing wrong, not because I wrote a zero into it. After a SCSI rescan the volume was there: GPT intact, NTFS boot sector valid, MFT starting with <code>46 49 4c 45</code> — <code>FILE</code>. 41.5&nbsp;GB of live data on a 119.3&nbsp;GB volume, all of it readable.</p>
+
+<p>I imaged it immediately, over USB rather than the network (126&nbsp;MB/s against 11), and booted the image in QEMU behind a qcow2 overlay with UEFI firmware, with <code>-nic none</code> — a recovered Windows install may carry remote-access software that starts on its own and would appear online with the same identity as the real machine. It reached the desktop.</p>
+
+<h2>The actual cause, which was not the drive</h2>
+
+<p>Once the drive was healthy, <code>smartctl -x</code> worked fine, and it had something to say:</p>
+
+<table>
+  <tr><th>Attribute</th><th class="num">Value</th><th></th></tr>
+  <tr><td>Power_On_Hours</td><td class="num">74999</td><td>8.6 years</td></tr>
+  <tr><td>Power_Cycle_Count</td><td class="num">2368</td><td></td></tr>
+  <tr><td>Power-Off_Retract_Count</td><td class="num">2358</td><td>unexpected power loss</td></tr>
+  <tr><td>(life left)</td><td class="num">92</td><td>zero read errors</td></tr>
+</table>
+
+<p><strong>2358 unclean shutdowns out of 2368 power cycles.</strong> 99.6% of this drive's life ended in sudden power loss. It had 92% of its write endurance left. It was not worn out; it was being switched off.</p>
+
+<p>Put that next to the rest of the evidence — a metadata block full and needing roll-over, one of the four firmware copies carrying an erased page in the middle, and a crash log written during a read-retry sweep — and the picture is consistent: an interrupted system-area update.</p>
+
+<p>Which means the repair is not the fix. If your drive looks like this, erasing a block will get your data back, and then the same thing will happen again. The fix is a clean shutdown path, or a UPS.</p>
+
+<h2>What I did not solve</h2>
+
+<p>The recovery is finished — the drive works, the image boots — so none of this blocked anything. But the raw-dump reconstruction path is genuinely incomplete, and I would rather say so plainly than let someone discover it the hard way:</p>
+
+<ul>
+  <li><strong>Version ordering.</strong> Sorting versions of the same LBA by <code>(superblock sequence, physical page index)</code> picks the correct one 42% of the time among complete frames. The key is wrong and I do not know the right one.</li>
+  <li><strong>Coverage.</strong> The dump held 77% of the volume's live clusters, but only 50% in complete frames. An NTFS volume missing a quarter of its used clusters does not mount. Repairing the controller and letting its own firmware serve the data was the shorter path by a very wide margin.</li>
+  <li><strong>23% of live clusters were in no dumped page at all</strong>, after searching all 8768 block files for their content. I recorded this as unexplained when the dump was my only evidence. It no longer is — the repaired drive can be queried directly — and I simply never went back to it.</li>
+  <li><strong>Bit 3 of the protect flag.</strong> Read together with bit 2, no setter located anywhere in the firmware. Which means a drive can be held in protect mode by a bit whose cause nobody can currently name.</li>
+</ul>
+
+<h2>If you have one of these drives</h2>
+
+<p>Two read-only commands tell you whether your drive is this case. Neither writes anything.</p>
+
+<pre><code># 1. the symptom
+sudo hdparm -I /dev/sdX | grep -E 'Model|Firmware'
+
+# 2. the cause, straight out of controller RAM
+sudo PYTHONPATH=/path/to/psychite/src \
+     python3 tools/safe_dump.py /dev/sgX diag-protect</code></pre>
+
+<div class="note">
+<p><strong>Four things have to hold</strong> before the repair in this writeup applies: the flag reads exactly <code>04</code>, the error-unit block is not <code>ff</code>, and the system unit header and block map were <em>both</em> found.</p>
+<p>If any other bit is set, or the header and map come back <code>ff</code>, <strong>stop.</strong> Your cause is something else, and erasing would be a guess. And dump the whole chip, in the correct read mode, before you write anything at all.</p>
+</div>
+
+<p>One more thing, in case it saves someone a bad afternoon: this drive hung the host during boot until I passed <code>systemd.mask=smartmontools.service</code> and <code>ahci.mobile_lpm_policy=1</code>. <code>smartd</code> querying it during startup consistently preceded the hard-reset failure. After the repair, <code>smartctl</code> worked without trouble — which suggests the fragility belonged to protect mode and not to SMART, though I never proved it.</p>
+
+<h2>Everything is in the repo</h2>
+
+<p>The notes, the memory map, the OOB format, the dead ends with their measurements, a machine-readable JSON summary of every address and magic value, the Ghidra scripts that load and label the firmware, and the tools — including an allowlist wrapper over the vendor command set, so that a typo cannot reach an erase or a firmware write:</p>
+
+<p><strong><a href="https://github.com/stperin/phison-ps3111-s11-recovery">github.com/stperin/phison-ps3111-s11-recovery</a></strong></p>
+
+<p>It is MIT licensed. Psychite is not vendored there — it declares no licence, so it is not redistributed; install it from upstream.</p>
+
+<p>This is work I did for myself, on my own drive, and it worked: I got the data back. It is not a polished product and does not pretend to be — one drive, one fault, with the dead ends left in. I am publishing it because the findings should be out there rather than sitting in my notes, and because someone facing a different Phison problem deserves somewhere to start. Take whatever is useful.</p>
+
+<footer>
+<p>The hard part — VUC transport, command set, firmware container — is <a href="https://github.com/trulycrisp/psychite">Psychite</a> by trulycrisp. Thank you.</p>
+<p>Addresses and function names are from firmware <code>SBFM21.1</code> on a Silicon Power M56 120&nbsp;GB. Treat them as specific to that image until you have checked yours.</p>
+</footer>
+
+</main>
+</body>
+</html>
