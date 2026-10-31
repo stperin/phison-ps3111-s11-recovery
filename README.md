@@ -1,5 +1,15 @@
 # Phison PS3111-S11: diagnosing and repairing "SATAFIRM S11"
 
+> **TL;DR** — A PS3111-S11 reporting `SATAFIRM S11` is not necessarily bricked, and
+> reflashing it is not the first thing to try. On this drive the entire fault was **one
+> bit in a RAM flag**, set at every boot because the firmware's system-area scan found a
+> single `ERROR_UNIT` page on the NAND. **Erasing that one block ended it permanently.**
+> The drive came back as `SPCC M.2 SSD` / `SBFM21.1`, with every byte of user data
+> intact; a full image taken from it boots Windows to the desktop. No firmware flash, no
+> MPTool, no reinitialisation — each of which would have destroyed the data for good.
+> Two read-only commands tell you whether your drive is this case: see
+> [Quick check](#quick-check-is-this-your-drive).
+
 Notes and tools from recovering a Silicon Power M56 120 GB SSD (Phison PS3111-S11
 controller) that presented itself as `SATAFIRM S11` / firmware `SBFM21W1` and served
 no data.
@@ -14,6 +24,41 @@ controller. See [What did not work](docs/04-what-did-not-work.md) for the equall
 important half.
 
 ---
+
+## Quick check: is this your drive?
+
+Both commands are read-only and take seconds. The second needs
+[Psychite](https://github.com/trulycrisp/psychite) and the SCSI generic node of the
+drive — `/dev/sgX`, which `lsblk -o NAME,MODEL` and `sg_map -i` will give you.
+
+```sh
+# 1. the symptom
+sudo hdparm -I /dev/sdX | grep -E 'Model|Firmware'
+
+# 2. the cause: protect flag + init-scan variables, straight out of controller RAM
+sudo PYTHONPATH=/path/to/psychite/src \
+     python3 tools/safe_dump.py /dev/sgX diag-protect
+```
+
+A drive in this repo's fault class answers like this:
+
+```
+IDENTIFY model='SATAFIRM   S11' firmware='SBFM21W1'
+0x5c0cb5f0 [1] 04        protect flag: bit 2, and nothing else
+0x5c0ceaac [1] 03        error unit at firmware block 3  (= physical block 12)
+0x5c0ce6da [1] 05        system unit header found
+0x5c0ce6db [1] 07        block map found
+```
+
+Four things have to hold: the flag is **exactly `04`**, the error-unit block is **not
+`ff`**, and the system unit header and block map were **both found** (neither is `ff`).
+
+If any other bit of the flag is set, or the header and map come back `ff`, **stop.** The
+cause is something else, this repair does not apply, and erasing would be a guess. The
+bit-by-bit meaning is in [Protect mode](docs/01-protect-mode.md).
+
+Remember the ÷4 when you go from that output to a block number: firmware block 3 is
+physical block 12.
 
 ## The short version
 
@@ -41,6 +86,7 @@ Full detail: [Protect mode](docs/01-protect-mode.md).
 | [02 - NAND page format](docs/02-page-format.md) | OOB layout, page-type magics, frame entries, partial frames, block numbering |
 | [03 - Repair procedure](docs/03-repair.md) | Step by step, with the interlocks that make it safe |
 | [04 - What did not work](docs/04-what-did-not-work.md) | Dead ends, wrong hypotheses, and the method lesson |
+| [05 - Tool reference](docs/05-tools.md) | Every parameter of every tool, and the environment variables |
 
 ## Findings that may be reusable
 
@@ -106,6 +152,8 @@ of the vendor command set, so a typo cannot reach an erase or a firmware write.
 | `tools/ntfs_usage.py` | Read NTFS `$Bitmap` from a disk image without mounting it |
 | `tools/scan_ntfs.py` | Count valid MFT records and index blocks in raw dumps |
 | `ghidra/scripts/` | Load firmware sections at their real addresses; find and trace the protect flag |
+
+Full parameter reference: [05 - Tool reference](docs/05-tools.md).
 
 Useful `safe_dump.py` subcommands:
 
