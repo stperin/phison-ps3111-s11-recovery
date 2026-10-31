@@ -129,7 +129,16 @@ margin. Treat this tool as a starting point, not a solution.
 
 ## Open problems
 
-Precise, and the data to attack them mostly exists:
+None of these blocked the recovery. The drive was repaired, imaged, and the image boots;
+that line of work is finished. What follows is open for *other* paths, and it is worth
+being clear about which.
+
+### If the controller cannot be repaired
+
+These three matter only when you must rebuild a volume from a raw dump alone — a dead
+controller, a chip-off read, a fault outside the class this repo covers. When the
+controller can be made to serve its own data, repairing it is the shorter path by a wide
+margin, and none of this is on the critical path.
 
 1. **Version ordering.** `(sequence, physical page index)` picks the correct version 42%
    of the time among complete frames. The ordering key is wrong and the right one is not
@@ -138,9 +147,20 @@ Precise, and the data to attack them mostly exists:
    bits are undecoded.
 3. **Non-run masks.** Byte 9 values that are neither a leading nor a trailing run
    (`0x38`, `0x70`, `0x83`, `0x78`) give a length inconsistent with the observed fill.
+
+### Not investigated further
+
 4. **The missing 23%.** Of the volume's live clusters, 23% were in no dumped page, after
-   searching all 8768 block files for their content. Unexplained.
-5. **Bit 3 of the protect flag.** Read together with bit 2; no setter located.
+   searching all 8768 block files for their content. This was recorded as unexplained
+   while the dump was the only evidence available. It is no longer: the repaired drive
+   can be queried directly, which is how the partial-frame rule was settled. The question
+   is cheap to answer now and simply was not pursued.
+
+### Independent of reconstruction
+
+5. **Bit 3 of the protect flag.** Read together with bit 2 by `FUN_6000892c`; no setter
+   located. This one has practical weight regardless of the path taken: `diag-protect`
+   can report a drive held in protect mode by a bit whose cause nobody can name.
 
 The method that cracked the others is worth copying: get a known-good copy of the same
 device, locate content by hash, and read the rule off the result rather than inferring
