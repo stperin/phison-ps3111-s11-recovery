@@ -338,6 +338,16 @@ after:  IDENTIFY model='SPCC M.2 SSD' firmware='SBFM21.1'</code></pre>
   <li><strong>Bit 3 of the protect flag.</strong> Read together with bit 2, no setter located anywhere in the firmware. Which means a drive can be held in protect mode by a bit whose cause nobody can currently name.</li>
 </ul>
 
+<h2>A note on how this was done</h2>
+
+<p>I worked through this with an LLM — Claude — as a partner the whole way: reading Xtensa decompilation, proposing and discarding hypotheses, writing the tools, and writing this page. I am saying so because the division of labour turned out to be more interesting than the fact, and because you are reading prose it helped produce.</p>
+
+<p>What it was unambiguously good at was volume. Scanning a few thousand lines of decompiled Xtensa for the one store to one address is mechanical and tedious, and it does not get bored or skip ahead. Same for cross-checking an OOB field across 8768 block files, or grinding through all eight hypotheses in the table above and reporting each negative result cleanly.</p>
+
+<p>What it was bad at is the part that cost the most time, and the shape of it was characteristic. <strong>That chain of exclusions above is largely a shared failure.</strong> Each negative result came back as a more elaborate hypothesis — stated, I should add, with noticeably more confidence than the evidence supported — rather than as a reason to doubt the premise. A partner willing to generate the next hypothesis indefinitely makes it very easy never to stop and ask whether the question itself is wrong. Meanwhile the ÷4 block factor and the pSLC read mode, which were the two things actually blocking everything, were both found the ordinary way: by noticing that two numbers that should have agreed did not. Both had been sitting in plain view for days.</p>
+
+<p>So the honest summary is that the deadlock was not broken by a better reasoner. It was broken by ground truth — a repaired drive I could query — and the rule fell out in an afternoon. I think that is worth holding onto at the current moment of enthusiasm. <strong>The binding constraint on this project was never the rate at which hypotheses could be produced. It was the rate at which they could be checked against something already known, and nothing about an LLM improves that rate.</strong> It will, however, happily help you generate wrong answers faster than you can check them.</p>
+
 <h2>If you have one of these drives</h2>
 
 <p>Two read-only commands tell you whether your drive is this case. Neither writes anything.</p>
