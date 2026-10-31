@@ -84,6 +84,14 @@ frame[0 .. n*512) == device sectors [LBA + shift, LBA + 8)
 
 Verified against the repaired device by content hash: 60 of 60, 100%.
 
+**The drive was not worn out — it was being switched off.** Once healthy, `smartctl -x`
+reported 74999 power-on hours, 2368 power cycles, and **2358 `Power-Off_Retract_Count`**:
+99.6% of those cycles ended in unexpected power loss. Life left 92%, zero read errors.
+Together with a metadata block full and needing roll-over, and an erased page in the
+middle of one firmware copy, that points at an interrupted system-area update. Run SMART
+after any repair of this kind: if this is the pattern, the repair is not the fix, and the
+drive will do it again. Detail in [Repair procedure](docs/03-repair.md).
+
 ## Tools
 
 All of these wrap [Psychite](https://github.com/trulycrisp/psychite) and need it
