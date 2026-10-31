@@ -1,0 +1,103 @@
+{
+  "_comment": "Machine-readable summary of the PS3111-S11 facts established in this repository. Firmware SBFM21.1 unless noted. See docs/ for how each was verified.",
+  "controller": "Phison PS3111-S11",
+  "firmware": "SBFM21.1",
+  "memory_map": {
+    "mask_rom": {"base": "0x5C0D8000", "size": 32768, "note": "reading it hangs the controller"},
+    "iram": {"base": "0x5C0C8000", "size": 196608},
+    "firmware_header": {"base": "0x5C0D4000"},
+    "entry_point": "0x5C0E0400",
+    "sram": {"base": "0x60000400", "size": 34603008},
+    "scan_oob_buffer": {"base": "0x50001200", "stride": 256, "slots": 4}
+  },
+  "firmware_sections": [
+    {"name": "sec0", "load": "0x5C0E0000", "size": 131072},
+    {"name": "sec1", "load": "0x5C0C8000", "size": 32768},
+    {"name": "sec2", "load": "0x60000400", "size": 524288}
+  ],
+  "protect_flag": {
+    "address": "0x5C0CB5F0",
+    "size": 1,
+    "note": "any non-zero value makes IDENTIFY report SATAFIRM S11 / SBFM21W1; read live by FUN_60004c4c",
+    "bits": {
+      "0": {"set_by": "FUN_6003bde8", "condition": "NAND context +0xfec non-zero"},
+      "1": {"set_by": "FUN_60056864", "condition": "hardware pin/register, reg+0x31c bit 9"},
+      "2": {"set_by": "FUN_60016c4c", "condition": "system-area scan found an ERROR_UNIT page"},
+      "3": {"set_by": null, "condition": "unknown; read together with bit 2 by FUN_6000892c"}
+    }
+  },
+  "diagnostic_variables": [
+    {"address": "0x5C0CB5F0", "size": 1, "name": "protect_flag"},
+    {"address": "0x5C0CEAAC", "size": 1, "name": "error_unit_block", "note": "firmware numbering"},
+    {"address": "0x5C0CE6DA", "size": 1, "name": "system_unit_header_block", "none": "0xFF"},
+    {"address": "0x5C0CE6DB", "size": 1, "name": "block_map_block", "none": "0xFF"},
+    {"address": "0x5C0CE9AB", "size": 1, "name": "scan_block_limit"},
+    {"address": "0x5C0CE6B4", "size": 1, "name": "ce_count"},
+    {"address": "0x5C0CEAE8", "size": 4, "name": "ce_bitmap"},
+    {"address": "0x6005CD00", "size": 12, "name": "found_blocks", "layout": "[0..5] system unit headers, [6..11] block maps"},
+    {"address": "0x6005CD10", "size": 48, "name": "found_sequences"}
+  ],
+  "page_magics": {
+    "0x31113111": "FIRMWARE_HEADER",
+    "0x55AA55AA": "FIRMWARE_CODE",
+    "0xFFA00000": "SYSTEM_UNIT_HEADER",
+    "0x44505354": "SYSTEM_UNIT_DATA",
+    "0x3FB10200": "BLOCK_MAP",
+    "0x3FB10400": "PRODUCT_HISTORY",
+    "0xFFB00000": "FTL_STATISTICS_UNIT",
+    "0xFFD00000": "ERROR_UNIT"
+  },
+  "error_unit_test": {
+    "expression": "(~value & 0xFFD00000) == 0",
+    "note": "a mask test, not equality: 0xFFFFFFFF would also match. On this drive unwritten pages read as 0x00000000 through the VUC path, so they do not trigger it."
+  },
+  "oob": {
+    "size": 512,
+    "entries": 16,
+    "entry_size": 16,
+    "page_header": {
+      "lba_or_magic": {"offset": 0, "size": 4, "endian": "little"},
+      "sequence": {"offset": 4, "size": 4, "endian": "little", "note": "high byte 0xFF for user pages, otherwise a sub-type tag"},
+      "ecc_corrected_bits": {"offset": 8, "size": 1, "note": "0xFF = page never written"},
+      "ce_id": {"offset": 10, "size": 1, "note": "ce_bitmap address; use to verify CE selection"},
+      "physical_page_index": {"offset": 14, "size": 2, "endian": "big", "divisor": 64}
+    },
+    "frame_entry": {
+      "note": "entries 1..4, one per 4 KB frame",
+      "lba_sectors": {"offset": 0, "size": 4, "endian": "little", "empty": "0x1FFFFFE8"},
+      "flags": {"offset": 8, "size": 1, "bit0": "partial frame"},
+      "length_mask": {"offset": 9, "size": 1},
+      "length_alt": {"offset": 10, "size": 1, "note": "low nibble repeats the sector count; byte 9 wins on disagreement"},
+      "crc": {"offset": 12, "size": 4}
+    }
+  },
+  "partial_frame_rule": {
+    "applies_when": "flags bit 0 == 1",
+    "n": "run length of bits equal to bit 0 of byte 9, starting at bit 0",
+    "shift": "8 - n",
+    "mapping": "frame[0 .. n*512) == device sectors [LBA + shift, LBA + 8)",
+    "fill": "0x78",
+    "verified": "60/60 frames located by content hash on a known-good device",
+    "unsolved": ["remaining bits of byte 10", "masks that are neither a leading nor a trailing run: 0x38, 0x70, 0x83, 0x78"]
+  },
+  "addressing": {
+    "firmware_block_to_physical": "physical = firmware * 4",
+    "note": "a firmware block spans four internal units; OOB ce_id makes the grouping visible",
+    "ce_encoding": "ce_raw = (((bitmap_address >> 2) & 1) << 3) | ((bitmap_address >> 3) & 1)",
+    "ce_encoding_note": "Psychite uses the bitmap bit position (0/4/8/12); 4 and 12 silently re-read CE0/CE1 at page+2"
+  },
+  "read_modes": {
+    "pslc": {"lba_bit": 15, "pages_per_block": 512},
+    "mlc": {"pages_per_block": 1024},
+    "warning": "a pSLC block read in MLC mode looks erased; verify by checking the OOB physical page index against the read order"
+  },
+  "observed_geometry": {
+    "ce_count": 4,
+    "dies_per_ce": 1,
+    "blocks_per_die": 2192,
+    "pages_per_block": 1024,
+    "sectors_per_page": 32,
+    "page_bytes": 16384,
+    "note": "from the controller's own SYSTEM_INFO on one drive; not necessarily universal"
+  }
+}

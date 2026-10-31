@@ -119,6 +119,34 @@ An NTFS volume missing a quarter of its used clusters does not mount. Repairing 
 drive and letting its own firmware serve the data was the shorter path by a wide
 margin. Treat this tool as a starting point, not a solution.
 
+## Open problems
+
+Precise, and the data to attack them mostly exists:
+
+1. **Version ordering.** `(sequence, physical page index)` picks the correct version 42%
+   of the time among complete frames. The ordering key is wrong and the right one is not
+   known.
+2. **Byte 10 of the frame entry.** Its low nibble repeats the sector count; the upper
+   bits are undecoded.
+3. **Non-run masks.** Byte 9 values that are neither a leading nor a trailing run
+   (`0x38`, `0x70`, `0x83`, `0x78`) give a length inconsistent with the observed fill.
+4. **The missing 23%.** Of the volume's live clusters, 23% were in no dumped page, after
+   searching all 8768 block files for their content. Unexplained.
+5. **Bit 3 of the protect flag.** Read together with bit 2; no setter located.
+
+The method that cracked the others is worth copying: get a known-good copy of the same
+device, locate content by hash, and read the rule off the result rather than inferring
+it from statistics.
+
+## Machine-readable summary
+
+[`ps3111-s11.json`](ps3111-s11.json) carries the memory map, flag bits, diagnostic
+variable addresses, page magics, OOB field offsets and the partial-frame rule, so other
+tools can consume them without parsing prose.
+
+`ghidra/scripts/LabelS11.java` applies the function and variable names to a freshly
+loaded firmware image.
+
 ## Safety
 
 Reading is cheap; writing is not. The order that worked:
