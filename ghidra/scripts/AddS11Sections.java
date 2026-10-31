@@ -1,4 +1,5 @@
-// Prescript: aggiunge le sezioni 1 e 2 del firmware S11 (la 0 è il file importato a 0x5C0E0000).
+// Prescript: adds sections 1 and 2 of the S11 firmware (section 0 is the file imported at 0x5C0E0000).
+// Without this nothing resolves: cross-references land outside any defined memory block.
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.mem.*;
@@ -19,6 +20,6 @@ public class AddS11Sections extends GhidraScript {
         Address a = toAddr(base);
         MemoryBlock b = mem.createInitializedBlock(name, a, new ByteArrayInputStream(data), data.length, monitor, false);
         b.setRead(true); b.setWrite(true); b.setExecute(true);
-        println("aggiunto " + name + " a " + a + " (" + data.length + " byte)");
+        println("added " + name + " at " + a + " (" + data.length + " bytes)");
     }
 }

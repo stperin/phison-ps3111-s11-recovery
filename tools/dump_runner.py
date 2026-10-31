@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Dump lungo con recupero automatico del controller.
+"""Long dump with automatic controller recovery.
 
-Gira su questo PC. Lancia safe_dump.py dump sul target in streaming verso safe_dump.py receive.
-Se il controller si pianta (riga FATAL):
-  - registra la pagina in OUTDIR/fatal.txt;
-  - modo "block" (default): salta il resto del blocco e lo mette in OUTDIR/retry.txt
-    (di solito un blocco pSLC letto in MLC: va riletto con --pslc in una seconda passata);
-  - modo "page": salta solo quella pagina;
-  - recupera l'SSD (sospensione S3 con sveglia RTC, poi delete + rescan SCSI) e riparte dal manifest.
+Runs on your workstation. Starts `safe_dump.py dump` on the target, streaming into
+`safe_dump.py receive` here. When the controller hangs (a FATAL line):
+  - records the page in OUTDIR/fatal.txt;
+  - mode "block" (default): abandons the rest of the block and queues it in OUTDIR/retry.txt
+    (usually a pSLC block being read in MLC: re-read it with --pslc in a second pass);
+  - mode "page": skips only that page;
+  - recovers the SSD (S3 suspend with an RTC wake-up, then SCSI delete + rescan) and resumes
+    from the manifest.
 
-Uso:
-  tools/dump_runner.py --only FILE OUTDIR            # FILE: righe "ce die block"
+Usage:
+  tools/dump_runner.py --only FILE OUTDIR            # FILE: lines of "ce die block"
   tools/dump_runner.py --only retry.txt --pslc --pages 0-511 --on-fatal page OUTDIR_PSLC
 """
 
@@ -22,11 +23,15 @@ import subprocess
 import sys
 import time
 
-TARGET = os.environ.get("S11_TARGET", "user@TARGET-IP")  # es. S11_TARGET=user@192.0.2.10
+TARGET = os.environ.get("S11_TARGET", "user@TARGET-IP")  # e.g. S11_TARGET=user@192.0.2.10
 PSYCHITE = "/run/live/medium/live/psychite/src"
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15"]
 HERE = pathlib.Path(__file__).resolve().parent
-# /dev/sgX dell'SSD (porta ata3): può cambiare dopo un rescan
+# TODO: the target layout is hard-coded throughout this file -- the SSD on ata3, /dev/sda,
+# scsi_host2, the /home/user working directory and the Psychite path above. It worked on one
+# machine; anyone else has to edit the source. These belong in environment variables next to
+# S11_TARGET, or in a small config read at startup.
+# /dev/sgX of the SSD (port ata3): it can change after a rescan
 FIND_SG = 'SG=$(for s in /sys/class/scsi_generic/*; do readlink -f $s/device | grep -q /ata3/ && echo /dev/$(basename $s); done)'
 
 
@@ -51,14 +56,14 @@ def wait_ssh(limit: int = 300) -> bool:
 
 
 def recover() -> bool:
-    log("recupero SSD: sospensione S3 di 20 s")
+    log("recovering the SSD: 20 s S3 suspend")
     ssh(
         'sudo sh -c "echo 0 > /sys/class/rtc/rtc0/wakealarm; echo +20 > /sys/class/rtc/rtc0/wakealarm; '
         'nohup sh -c \\"sleep 2; echo mem > /sys/power/state\\" >/dev/null 2>&1 &"'
     )
     time.sleep(15)
     if not wait_ssh():
-        log("target non raggiungibile dopo la sospensione")
+        log("target unreachable after the suspend")
         return False
     r = ssh(
         'sudo sh -c "echo 1 > /sys/block/sda/device/delete" 2>/dev/null; sleep 2; '
@@ -68,7 +73,7 @@ def recover() -> bool:
         timeout=120,
     )
     ok = r.returncode == 0 and r.stdout.strip() == "1"
-    log("SSD di nuovo raggiungibile" if ok else f"recupero fallito: {r.stdout} {r.stderr}")
+    log("SSD reachable again" if ok else f"recovery failed: {r.stdout} {r.stderr}")
     return ok
 
 
@@ -93,7 +98,7 @@ def read_lines(path: pathlib.Path) -> list[tuple[int, ...]]:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("outdir")
-    p.add_argument("--only", required=True, help='file con righe "ce die block"')
+    p.add_argument("--only", required=True, help='file of "ce die block" lines')
     p.add_argument("--pslc", action="store_true")
     p.add_argument("--pages", default="all")
     p.add_argument("--on-fatal", choices=("block", "page"), default="block")
@@ -101,7 +106,7 @@ def main() -> None:
     p.add_argument(
         "--skip-pages",
         default="",
-        help="pagine da non leggere per CE, es. '1:1022-1023' (con la codifica CE corretta non serve)",
+        help="pages never to read, per CE, e.g. '1:1022-1023' (unnecessary with the correct CE encoding)",
     )
     args = p.parse_args()
 
@@ -122,9 +127,9 @@ def main() -> None:
         retry = set(read_lines(retry_file))
         fatal = read_lines(fatal_file)
         todo = [t for t in targets if t not in done and t not in retry]
-        log(f"blocchi: {len(targets)} totali, {len(done)} fatti, {len(retry)} da rifare in pSLC, {len(todo)} da fare")
+        log(f"blocks: {len(targets)} total, {len(done)} done, {len(retry)} queued for pSLC, {len(todo)} to go")
         if not todo:
-            log("finito")
+            log("finished")
             return
         plan = "".join(f"only {c} {d} {b}\n" for c, d, b in todo)
         plan += "".join(f"skippage {c} {d} {b} {pg}\n" for c, d, b, pg in fatal)
@@ -151,7 +156,10 @@ def main() -> None:
             line = raw.decode(errors="replace").rstrip()
             if m := re.match(r"FATAL (\d+) (\d+) (\d+) (\d+)", line):
                 fatal_at = tuple(map(int, m.groups()))
-            elif line.startswith("blocco "):
+            # TODO: this couples to the exact wording of safe_dump.py's progress line. Both ends
+            # have to move together, which is easy to forget. A one-character prefix (or a FATAL-style
+            # keyword) would be a real protocol instead of a sentence.
+            elif line.startswith("block "):
                 n += 1
                 last_progress = line
                 if n % 50 == 0:
@@ -160,10 +168,10 @@ def main() -> None:
                 log(f"target: {line}")
         dump.wait()
         receive.wait()
-        log(f"dump terminato con codice {dump.returncode}; ultimo: {last_progress}")
+        log(f"dump exited with code {dump.returncode}; last: {last_progress}")
 
         if dump.returncode == 0:
-            continue  # rilegge il manifest: se manca qualcosa riparte, altrimenti "finito"
+            continue  # re-read the manifest: resume if anything is missing, otherwise "finished"
         if fatal_at:
             ce, die, block, page = fatal_at
             with open(fatal_file, "a") as f:
@@ -171,17 +179,17 @@ def main() -> None:
             if args.on_fatal == "block":
                 with open(retry_file, "a") as f:
                     f.write(f"{ce} {die} {block}\n")
-            log(f"controller bloccato a ce {ce} die {die} blocco {block} pagina {page}")
+            log(f"controller hung at ce {ce} die {die} block {block} page {page}")
         recoveries += 1
         if recoveries > args.max_recoveries:
-            raise SystemExit("troppi recuperi: mi fermo")
+            raise SystemExit("too many recoveries: stopping")
         if not fatal_at:
-            log("interruzione senza FATAL (rete?): attendo il target e controllo l'SSD")
+            log("interrupted without a FATAL (network?): waiting for the target, then checking the SSD")
             if not wait_ssh():
-                raise SystemExit("target non raggiungibile")
+                raise SystemExit("target unreachable")
         if fatal_at or not healthy():
             if not recover():
-                raise SystemExit("recupero non riuscito: serve intervento manuale (spegnere e riaccendere il target)")
+                raise SystemExit("recovery failed: manual intervention needed (power-cycle the target)")
 
 
 if __name__ == "__main__":

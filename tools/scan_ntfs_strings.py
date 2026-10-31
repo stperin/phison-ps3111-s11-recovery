@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Cerca nei dump le firme strutturali di NTFS, indipendenti dal formato dei record MFT.
+"""Searches the dumps for NTFS structural signatures, independent of MFT record layout.
 
-Serve come controprova al conteggio dei record "FILE": se la MFT e' davvero assente devono
-mancare anche i nomi dei metafile, che in NTFS stanno in UTF-16LE.
+The cross-check for the "FILE" record count: if the MFT really were gone, the metafile names
+would have to be missing too -- in NTFS they are stored as UTF-16LE.
+
+Usage:
+  scan_ntfs_strings.py DUMPDIR [DUMPDIR...]
 """
 import collections
 import pathlib
@@ -24,7 +27,7 @@ NEEDLES = {
 
 def main():
     found = collections.Counter()
-    blocchi = collections.defaultdict(set)
+    examples = collections.defaultdict(set)
     n = 0
     for d in sys.argv[1:]:
         for path in sorted(pathlib.Path(d).rglob("*.data")):
@@ -33,15 +36,15 @@ def main():
                 off = data.find(needle)
                 while off >= 0:
                     found[name] += 1
-                    if len(blocchi[name]) < 8:
-                        blocchi[name].add(path.name)
+                    if len(examples[name]) < 8:
+                        examples[name].add(path.name)
                     off = data.find(needle, off + 1)
             n += 1
             if n % 1000 == 0:
-                print(f"{n} file: {dict(found)}", flush=True)
-    print(f"TOTALE {n} file", flush=True)
+                print(f"{n} files: {dict(found)}", flush=True)
+    print(f"TOTAL {n} files", flush=True)
     for name in NEEDLES:
-        print(f"  {name:18s} {found[name]:8d}  es. {sorted(blocchi[name])[:4]}", flush=True)
+        print(f"  {name:18s} {found[name]:8d}  e.g. {sorted(examples[name])[:4]}", flush=True)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,12 @@
 > MPTool, no reinitialisation — each of which would have destroyed the data for good.
 > Two read-only commands tell you whether your drive is this case: see
 > [Quick check](#quick-check-is-this-your-drive).
+>
+> This is work I did for myself, on my own drive, and it worked — I got the data back.
+> It is not a polished product and it does not pretend to be: one drive, one fault, with
+> the dead ends left in. I am publishing it because the findings should be out there
+> rather than sitting in my notes, and because someone facing a different Phison problem
+> deserves somewhere to start. Take whatever is useful.
 
 Notes and tools from recovering a Silicon Power M56 120 GB SSD (Phison PS3111-S11
 controller) that presented itself as `SATAFIRM S11` / firmware `SBFM21W1` and served

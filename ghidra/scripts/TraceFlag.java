@@ -1,4 +1,5 @@
-// Trova chi usa il flag puntato da un literal (es. 0x60000414) e decompila le funzioni.
+// Finds everything that uses the flag pointed to by a literal (e.g. 0x60000414) and decompiles
+// those functions. Literal values come from S11_LITERALS, comma-separated.
 import ghidra.app.script.GhidraScript;
 import ghidra.app.decompiler.*;
 import ghidra.program.model.address.*;
@@ -19,7 +20,7 @@ public class TraceFlag extends GhidraScript {
             Address la = toAddr(Long.decode(lit));
             long target = mem.getInt(la) & 0xffffffffL;
             println("== literal " + la + " -> flag a 0x" + Long.toHexString(target));
-            // tutti i literal con lo stesso valore (stessa variabile da più pool)
+            // every literal with the same value (the same variable reached from several pools)
             byte[] le = new byte[4];
             for (int i = 0; i < 4; i++) le[i] = (byte) (target >> (8 * i));
             Address p = mem.getMinAddress();
@@ -30,7 +31,7 @@ public class TraceFlag extends GhidraScript {
             }
             for (Address from : users) {
                 Function f = getFunctionContaining(from);
-                println("   usato da " + from + " in " + (f == null ? "?" : f.getName()));
+                println("   used by " + from + " in " + (f == null ? "?" : f.getName()));
                 if (f != null && seen.add(f)) {
                     DecompileResults res = dec.decompileFunction(f, 60, monitor);
                     if (res.decompileCompleted()) println("----- " + f.getName() + "\n" + res.getDecompiledFunction().getC());

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Conta i record MFT e gli indici di directory NTFS nei dump raw.
+"""Counts NTFS MFT records and directory indexes in raw dumps.
 
-Un record MFT valido: firma "FILE" allineata a 1024 byte, dimensione allocata (+0x1c) 1024 o 4096,
-flag (+0x16) in 0..3 e offset dell'update sequence (+0x04) plausibile. Senza questi controlli la
-firma da sola produce falsi positivi dentro i dati utente.
+A valid MFT record: a "FILE" signature at 1024-byte alignment, allocated size (+0x1c) of 1024 or
+4096, flags (+0x16) in 0..3 and a plausible update-sequence offset (+0x04). Without those checks
+the signature alone produces false positives inside user data -- which is how a drive can look
+like it has lost its MFT when it has not.
+
+Usage:
+  scan_ntfs.py DUMPDIR [DUMPDIR...]
 """
 import collections
 import pathlib
@@ -26,10 +30,10 @@ def scan_file(path, found):
         flags = struct.unpack_from("<H", data, off + 0x16)[0]
         used, alloc = struct.unpack_from("<II", data, off + 0x18)
         if alloc in (1024, 4096) and flags < 4 and 0x28 <= usa_off <= 0x40 and used <= alloc:
-            found["MFT valido"] += 1
+            found["valid MFT"] += 1
             found[f"  flags={flags}"] += 1
         else:
-            found["FILE non valido"] += 1
+            found["invalid FILE"] += 1
 
 
 def main():
@@ -40,8 +44,8 @@ def main():
             scan_file(path, found)
             nfiles += 1
             if nfiles % 500 == 0:
-                print(f"{nfiles} file, {dict(found)}", flush=True)
-    print(f"TOTALE {nfiles} file: {dict(found)}", flush=True)
+                print(f"{nfiles} files, {dict(found)}", flush=True)
+    print(f"TOTAL {nfiles} files: {dict(found)}", flush=True)
 
 
 if __name__ == "__main__":

@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Accesso in sola lettura ai VUC del Phison S11 (SATAFIRM), sopra Psychite.
+"""Read-only access to the Phison S11 vendor commands (SATAFIRM), on top of Psychite.
 
-Sul target (root, Psychite nel PYTHONPATH):
+On the target (as root, with Psychite on PYTHONPATH):
     PYTHONPATH=/run/live/medium/live/psychite/src python3 safe_dump.py /dev/sg0 sysinfo
-Dump in streaming verso questo PC:
+Streaming dump back to your workstation:
     ssh user@target 'sudo PYTHONPATH=... python3 safe_dump.py /dev/sg0 dump ... --out -' \
         | python3 safe_dump.py - receive OUTDIR
 
-Sicurezza: ogni comando ATA passa da SafeDrive.command, che ammette solo
+Safety: every ATA command goes through SafeDrive.command, which permits only
   - IDENTIFY DEVICE;
-  - STANDBY IMMEDIATE con la AP key (count 0x6F, LBA 0xFAEFFE), che "arma" un solo VUC;
-  - READ/WRITE SECTORS NO RETRY subito dopo la AP key, con feature VUC in allowlist.
-Le write (anche SET_PARAMETER) sono ammesse solo dopo una SystemInfo valida nella sessione:
-prova che il firmware intercetta i VUC, altrimenti la write finirebbe sull'LBA vero.
-Unlock e DOWNLOAD MICROCODE (solo header engineering) richiedono flag espliciti.
-Ogni comando è registrato in un log JSONL.
+  - STANDBY IMMEDIATE carrying the AP key (count 0x6F, LBA 0xFAEFFE), which arms one vendor command;
+  - READ/WRITE SECTORS NO RETRY immediately after that key, with a VUC feature on the allowlist.
+Writes (SET_PARAMETER included) are refused until a valid SystemInfo has been read in this session:
+that is the proof the firmware is intercepting vendor commands, without which a write would land
+on a real LBA. Unlock and DOWNLOAD MICROCODE (engineering header only) need explicit flags.
+Every command is recorded in a JSONL log.
 """
 
 import argparse
@@ -30,7 +30,7 @@ from typing import BinaryIO
 
 SECTOR_SIZE = 512
 
-# Stream dump: record pagina, fine blocco, fine stream
+# Dump stream: page record, end of block, end of stream
 PAGE_HEADER = struct.Struct("<4sBBHHBBII")  # magic, ce, die, block, page, flags, status, data_len, oob_len
 BLOCK_DONE = struct.Struct("<4sBBH")  # magic, ce, die, block
 MAGIC_PAGE = b"S11P"
@@ -43,14 +43,14 @@ STATUS_SKIPPED = 2
 
 
 class Blocked(Exception):
-    """Comando rifiutato dal filtro di sicurezza."""
+    """Command refused by the safety filter."""
 
 
 def _open_drive(args: argparse.Namespace):
-    # import qui: receive/done-list girano su questo PC senza Psychite
+    # imported here: receive/done-list run on the workstation, without Psychite
     import ctypes
 
-    if not hasattr(ctypes, "_CData"):  # Python < 3.14: Psychite lo usa nelle annotazioni
+    if not hasattr(ctypes, "_CData"):  # Python < 3.14: Psychite refers to it in annotations
         ctypes._CData = ctypes._SimpleCData.__mro__[1]
 
     from phison_s11 import drive as s11_drive
@@ -78,7 +78,7 @@ def _open_drive(args: argparse.Namespace):
     }
     vuc_write = {F.SET_PARAMETER}
     vuc_unlock_read = {F.VUC_UNLOCK_READ}
-    # lettura del firmware installato (read_firmware.py): SEND_SEED imposta la chiave di cifratura dell'output in RAM
+    # reading the installed firmware (read_firmware.py): SEND_SEED sets the output encryption key in RAM
     vuc_fw_read = {F.VERIFY_FLASH}
     vuc_fw_write = {F.SEND_SEED}
     vuc_unlock_write = {F.VUC_UNLOCK_START, F.VUC_UNLOCK_WRITE, F.VUC_LOCK}
@@ -86,26 +86,32 @@ def _open_drive(args: argparse.Namespace):
 
     def _refuse(name: str):
         def method(self, *a, **k):
-            raise Blocked(f"{name} vietato")
+            raise Blocked(f"{name} not permitted")
 
         return method
 
     class SafeDrive(s11_drive.Drive):
         def __init__(self, path: pathlib.Path, log: BinaryIO, errors_only: bool = False) -> None:
-            # niente vuc_unlock() automatico come in s11_drive.Drive.__init__
+            # no automatic vuc_unlock(), unlike s11_drive.Drive.__init__
             ata_drive.Drive.__init__(self, path)
             self._log = log
             self._log_errors_only = errors_only
             self._log_warned = False
             self._armed = False
             self.vuc_verified = False
+            # TODO: several cmd_* raise and lower these by hand (allow_x = True, operation,
+            # allow_x = False) with no try/finally -- clear-protect, update-firmware, engineering,
+            # unlock, read-firmware. If the operation raises, the flag stays raised for the rest of
+            # the process and the filter is more permissive than anyone expects. erase-block and
+            # restart do use try/finally, so the problem is known but not handled systematically.
+            # A context manager (with drive.allowing("erase"): ...) would make it impossible to forget.
             self.allow_unlock = False
             self.allow_engineering_dlmc = False
             self.allow_fw_read = False
-            self.allow_write_register = False  # scrittura in RAM/registri del controller (volatile, nessuna NAND)
-            self.allow_restart = False  # soft reset del controller (volatile)
-            self.allow_erase = False  # ERASE di un blocco NAND: IRREVERSIBILE, solo da cmd_erase_block
-            self.allow_dlmc_data: bytes | None = None  # unico firmware ammesso per DOWNLOAD MICROCODE segmentato
+            self.allow_write_register = False  # writes to controller RAM/registers (volatile, no NAND)
+            self.allow_restart = False  # soft controller reset (volatile)
+            self.allow_erase = False  # ERASE of a NAND block: IRREVERSIBLE, only from cmd_erase_block
+            self.allow_dlmc_data: bytes | None = None  # the only firmware allowed for segmented DOWNLOAD MICROCODE
             self.sysinfo_raw: bytes | None = None
 
         def _check(self, r, data) -> None:
@@ -120,7 +126,7 @@ def _open_drive(args: argparse.Namespace):
                 return
             if cmd in (C.READ_SECTORS_NO_RETRY, C.WRITE_SECTORS_NO_RETRY):
                 if not armed:
-                    raise Blocked(f"{C(cmd).name} senza AP key")
+                    raise Blocked(f"{C(cmd).name} without the AP key")
                 feat = r.feature
                 if cmd == C.READ_SECTORS_NO_RETRY and not is_write:
                     if (
@@ -131,7 +137,7 @@ def _open_drive(args: argparse.Namespace):
                         return
                 if cmd == C.WRITE_SECTORS_NO_RETRY and is_write:
                     if not self.vuc_verified:
-                        raise Blocked("write VUC prima di una SystemInfo valida")
+                        raise Blocked("VUC write before a valid SystemInfo")
                     if (
                         feat in vuc_write
                         or (self.allow_unlock and feat in vuc_unlock_write)
@@ -141,7 +147,7 @@ def _open_drive(args: argparse.Namespace):
                         or (self.allow_erase and feat == F.ERASE_FLASH)
                     ):
                         return
-                raise Blocked(f"VUC feature {feat:#x} non ammessa ({C(cmd).name})")
+                raise Blocked(f"VUC feature {feat:#x} not permitted ({C(cmd).name})")
             if (
                 cmd == C.DOWNLOAD_MICROCODE
                 and self.allow_engineering_dlmc
@@ -150,6 +156,11 @@ def _open_drive(args: argparse.Namespace):
                 and bytes(data) == engineering_header
             ):
                 return
+            # TODO: `in` is a substring search, not a positional comparison: it admits any chunk that
+            # appears anywhere in the approved firmware, in any order and any number of times. We promise
+            # "only this firmware" and enforce "bytes present in this firmware", which is the weakest
+            # point of the filter. Keep a cursor of the expected offset and require each segment to be
+            # the next one.
             if (
                 cmd == C.DOWNLOAD_MICROCODE
                 and self.allow_dlmc_data is not None
@@ -159,7 +170,7 @@ def _open_drive(args: argparse.Namespace):
             ):
                 return
             name = C(cmd).name if cmd in C._value2member_map_ else hex(cmd)
-            raise Blocked(f"comando ATA {name} non ammesso")
+            raise Blocked(f"ATA command {name} not permitted")
 
         def command(self, registers, data=None, dma=False, extend=False, timeout=30):
             entry = {
@@ -191,29 +202,29 @@ def _open_drive(args: argparse.Namespace):
             return result
 
         def _write_log(self, entry: dict) -> None:
-            # un log che non si riesce a scrivere (es. disco pieno) non deve fermare il lavoro
+            # a log that cannot be written (a full disk, say) must not stop the work
             try:
                 self._log.write((json.dumps(entry) + "\n").encode())
                 self._log.flush()
             except OSError as e:
                 if not self._log_warned:
-                    print(f"avviso: log non scrivibile: {e}", file=sys.stderr)
+                    print(f"warning: log not writable: {e}", file=sys.stderr)
                     self._log_warned = True
 
         def vuc_system_info(self):
             data = self.vuc(F.SYSTEM_INFO, s11_system_info.SystemInfo.SIZE)
-            info = s11_system_info.SystemInfo.from_bytes(data)  # ValueError se non è SystemInfo
+            info = s11_system_info.SystemInfo.from_bytes(data)  # ValueError if it is not a SystemInfo
             self.sysinfo_raw = data
             self.vuc_verified = True
             return info
 
         def _vuc_flash_set_parameter(self, ce_index, die, block, page, system_info):
-            """Come Psychite, ma con la codifica corretta del byte CE.
+            """As Psychite does it, but with the correct encoding of the CE byte.
 
-            Psychite usa la posizione del bit nella ce_bitmap (0/4/8/12). Sul target il byte è
-            (canale << 3) | (pagina_extra << 1) | ce_nel_canale: con 4 e 12 si rileggevano CE0/CE1 a pagina+2.
-            Indirizzo bitmap a -> byte ((a >> 2) & 1) << 3 | ((a >> 3) & 1): 0->0, 4->8, 8->1, 12->9.
-            Verificato con l'id CE nell'OOB (byte 10 = indirizzo bitmap).
+            Psychite uses the bit position within ce_bitmap (0/4/8/12). On the target the byte is
+            (channel << 3) | (extra_page << 1) | ce_within_channel: 4 and 12 silently re-read CE0/CE1
+            at page+2. Bitmap address a -> byte ((a >> 2) & 1) << 3 | ((a >> 3) & 1): 0->0, 4->8,
+            8->1, 12->9. Verified against the CE id in the OOB (byte 10 = bitmap address).
             """
             system_info = system_info or self.vuc_system_info()
             address = self._ce_address(ce_index, system_info)
@@ -228,32 +239,32 @@ def _open_drive(args: argparse.Namespace):
             self.vuc_set_parameter(struct.pack("<20xBxHH", ce_raw, block_address, page))
 
         def read_page(self, ce, die, block, page, pslc, info):
-            """Pagina raw: (dati, OOB 512 byte). Come vuc_read_flash ma con l'OOB intero."""
+            """Raw page: (data, 512-byte OOB). Like vuc_read_flash but with the whole OOB."""
             self._vuc_flash_set_parameter(ce, die, block, page, info)
             data_size = info.sectors_per_page * SECTOR_SIZE
-            # bit 16: formato parametri; 15: pSLC; 0: pagina intera.
-            # Il bit 13 ("solo OOB" secondo Psychite) sul target restituisce il primo settore di dati, non l'OOB.
+            # bit 16: parameter format; 15: pSLC; 0: whole page.
+            # Bit 13 ("OOB only" per Psychite) returns the first data sector on this target, not the OOB.
             lba = (1 << 16) | (int(pslc) << 15) | 1
             raw = self.vuc(F.READ_FLASH, data_size + SECTOR_SIZE, lba)
             return raw[:data_size], raw[data_size:]
 
         def vuc_write_register(self, address, data):
-            # scrittura in RAM/registri del controller: volatile, nessuna scrittura NAND; solo con allow_write_register
+            # write to controller RAM/registers: volatile, no NAND write; only with allow_write_register
             if not self.allow_write_register:
-                raise Blocked("vuc_write_register vietato")
+                raise Blocked("vuc_write_register not permitted")
             return s11_drive.Drive.vuc_write_register(self, address, data)
 
         def vuc_restart(self):
-            # soft reset del controller: volatile, nessuna scrittura NAND; solo con allow_restart
+            # soft controller reset: volatile, no NAND write; only with allow_restart
             if not self.allow_restart:
-                raise Blocked("vuc_restart vietato")
+                raise Blocked("vuc_restart not permitted")
             return s11_drive.Drive.vuc_restart(self)
 
         def vuc_erase_flash(self, ce_index, die, block, pslc, system_info=None):
-            # ERASE di un blocco NAND: irreversibile. Solo con allow_erase, che imposta cmd_erase_block
-            # dopo aver verificato il magic della pagina 0 e l'esistenza del backup locale.
+            # ERASE of a NAND block: irreversible. Only with allow_erase, which cmd_erase_block sets
+            # after checking the page-0 magic and the presence of the local backup.
             if not self.allow_erase:
-                raise Blocked("vuc_erase_flash vietato")
+                raise Blocked("vuc_erase_flash not permitted")
             return s11_drive.Drive.vuc_erase_flash(self, ce_index, die, block, pslc, system_info)
 
         vuc_write_flash = _refuse("vuc_write_flash")
@@ -291,9 +302,11 @@ def _parse_range(spec: str, limit: int) -> list[int]:
     out: list[int] = []
     for part in spec.split(","):
         a, _, b = part.partition("-")
+        # TODO: a reversed range ("100-50") silently yields an empty list instead of an error, and the
+        # dump then reads nothing without saying why. It should be reported.
         out.extend(range(int(a), int(b or a) + 1))
     if any(not 0 <= x < limit for x in out):
-        raise SystemExit(f"intervallo {spec} fuori da 0..{limit - 1}")
+        raise SystemExit(f"range {spec} outside 0..{limit - 1}")
     return out
 
 
@@ -325,7 +338,7 @@ def cmd_flash_id(drive, args) -> None:
 
 
 def cmd_block_map(drive, args) -> None:
-    """Come vuc_block_map, ma salva il raw e accetta tipi di blocco sconosciuti a Psychite."""
+    """Like vuc_block_map, but saves the raw data and accepts block types Psychite does not know."""
     from phison_s11 import drive as s11_drive
 
     info = drive.vuc_system_info()
@@ -355,25 +368,26 @@ def cmd_block_map(drive, args) -> None:
             for e in entries:
                 key = "None" if e is None else e[0]
                 counts[key] = counts.get(key, 0) + 1
-            print(f"canale {channel} die {die}: {counts}")
+            print(f"channel {channel} die {die}: {counts}")
 
 
 def cmd_read_sram(drive, args) -> None:
-    """Legge la SRAM a blocchi e salva ogni blocco subito: alcuni indirizzi bloccano il controller."""
+    """Reads SRAM in chunks and saves each chunk immediately: some addresses hang the controller."""
     drive.vuc_system_info()
     with open(args.out, "wb") as f:
         for addr in range(args.address, args.address + args.size, args.chunk):
             data = drive.vuc_read_sram(addr, min(args.chunk, args.address + args.size - addr))
             f.write(data)
             f.flush()
-            print(f"{addr:#x}: {len(data)} byte, non nulli {sum(1 for c in data if c)}", file=sys.stderr)
+            print(f"{addr:#x}: {len(data)} bytes, {sum(1 for c in data if c)} non-zero", file=sys.stderr)
 
 
 def cmd_probe_ce(drive, args) -> None:
-    """Legge (blocco, pagina) con un valore grezzo del byte CE nel parametro di READ_FLASH.
+    """Reads (block, page) with a raw value for the CE byte in the READ_FLASH parameter.
 
-    Psychite usa la posizione del bit nella ce_bitmap (0/4/8/12): 4 e 12 rileggono CE0/CE2 con pagina+2.
-    Serve a trovare la codifica che seleziona davvero CE1/CE3. Un valore errato può bloccare il controller.
+    Psychite uses the bit position within ce_bitmap (0/4/8/12): 4 and 12 re-read CE0/CE2 at page+2.
+    This is how you find the encoding that really selects CE1/CE3. A wrong value can hang the
+    controller.
     """
     import hashlib
 
@@ -387,45 +401,45 @@ def cmd_probe_ce(drive, args) -> None:
     raw = drive.vuc(s11_drive.VUCFeature.READ_FLASH, size + SECTOR_SIZE, lba)
     data, oob = raw[:size], raw[size:]
     pidx = int.from_bytes(oob[14:16], "big") // 0x40
-    print(f"ce_raw {args.ce_raw}: indice OOB {pidx}, byte8 {oob[8]}, oob {oob[:16].hex()}, sha1 {hashlib.sha1(data).hexdigest()[:12]}")
+    print(f"ce_raw {args.ce_raw}: OOB index {pidx}, byte8 {oob[8]}, oob {oob[:16].hex()}, sha1 {hashlib.sha1(data).hexdigest()[:12]}")
     if args.out:
         pathlib.Path(args.out).write_bytes(data)
         pathlib.Path(args.out + ".oob").write_bytes(oob)
 
 
-# Significato dei bit del flag di protect (0x5C0CB5F0), dal disassemblato di SBFM21.1:
-#   bit 0 -> FUN_6003bde8: contesto NAND +0xfec diverso da zero
-#   bit 1 -> FUN_60056864: stato di un pin/registro hardware (reg+0x31c bit 9), polarita' da config
-#   bit 2 -> FUN_60016c4c: la scansione dell'area di sistema ha trovato una pagina "ERROR_UNIT"
-#   bit 3 -> letto insieme al bit 2 da FUN_6000892c; il setter non e' nelle funzioni decompilate
+# Meaning of the protect-flag bits (0x5C0CB5F0), from the SBFM21.1 disassembly:
+#   bit 0 -> FUN_6003bde8: NAND context +0xfec is non-zero
+#   bit 1 -> FUN_60056864: state of a hardware pin/register (reg+0x31c bit 9), polarity from config
+#   bit 2 -> FUN_60016c4c: the system-area scan found an "ERROR_UNIT" page
+#   bit 3 -> read together with bit 2 by FUN_6000892c; the setter is not in the decompiled functions
 PROTECT_BITS = {
-    0: "bit0: contesto NAND non valido (FUN_6003bde8)",
-    1: "bit1: pin/registro hardware (FUN_60056864)",
-    2: "bit2: ERROR_UNIT o pagina cancellata nell'area di sistema (FUN_60016c4c)",
-    3: "bit3: condizione sconosciuta, consumata con il bit2 (FUN_6000892c)",
+    0: "bit0: invalid NAND context (FUN_6003bde8)",
+    1: "bit1: hardware pin/register (FUN_60056864)",
+    2: "bit2: ERROR_UNIT or erased page in the system area (FUN_60016c4c)",
+    3: "bit3: unknown condition, consumed together with bit2 (FUN_6000892c)",
 }
 
-# Variabili di diagnosi scritte dalla scansione di init FUN_60016c4c.
-# (indirizzo, lunghezza, descrizione). Tutte in IRAM/SRAM: sola lettura, nessuna NAND.
+# Diagnostic variables written by the init scan FUN_60016c4c.
+# (address, size, description). All in IRAM/SRAM: read-only, no NAND.
 DIAG_VARS = [
-    (0x5C0CB5F0, 1, "flag di protect (bitfield)"),
-    (0x5C0CEAAC, 1, "blocco in cui la scansione ha visto ERROR_UNIT"),
-    (0x5C0CE6DA, 1, "blocco del SYSTEM_UNIT_HEADER trovato (0xff = nessuno)"),
-    (0x5C0CE6DB, 1, "blocco del BLOCK_MAP trovato (0xff = nessuno)"),
-    (0x5C0CE9AB, 1, "limite di blocchi della scansione (init 100)"),
-    (0x5C0CE6B4, 1, "numero di CE"),
-    (0x5C0CEAE8, 4, "bitmap dei CE"),
-    (0x5C0CA0E0, 2, "contatori: SYSTEM_UNIT_HEADER, BLOCK_MAP"),
-    (0x5C0CE6EE, 1, "flag di geometria inizializzata"),
+    (0x5C0CB5F0, 1, "protect flag (bitfield)"),
+    (0x5C0CEAAC, 1, "block where the scan saw ERROR_UNIT"),
+    (0x5C0CE6DA, 1, "block of the SYSTEM_UNIT_HEADER found (0xff = none)"),
+    (0x5C0CE6DB, 1, "block of the BLOCK_MAP found (0xff = none)"),
+    (0x5C0CE9AB, 1, "scan block limit (starts at 100)"),
+    (0x5C0CE6B4, 1, "CE count"),
+    (0x5C0CEAE8, 4, "CE bitmap"),
+    (0x5C0CA0E0, 2, "counters: SYSTEM_UNIT_HEADER, BLOCK_MAP"),
+    (0x5C0CE6EE, 1, "geometry-initialised flag"),
 ]
 DIAG_SRAM = [
-    (0x6005CD40, 8, "array blocchi SYSTEM_UNIT_HEADER"),
-    (0x6005CD00, 8, "array blocchi BLOCK_MAP"),
-    (0x6005CD10, 32, "array numeri di sequenza (u32)"),
-    (0x50001200, 0x400, "buffer OOB della scansione (4 slot da 0x100)"),
+    (0x6005CD40, 8, "SYSTEM_UNIT_HEADER block array"),
+    (0x6005CD00, 8, "BLOCK_MAP block array"),
+    (0x6005CD10, 32, "sequence number array (u32)"),
+    (0x50001200, 0x400, "the scan's OOB buffer (4 slots of 0x100)"),
 ]
 
-# Magic del primo u32 dell'OOB, come li classifica FUN_60016c4c e il resto del firmware.
+# Magics of the first OOB u32, as FUN_60016c4c and the rest of the firmware classify them.
 PAGE_MAGIC = {
     0xFFA00000: "SYSTEM_UNIT_HEADER",
     0x3FB10200: "BLOCK_MAP",
@@ -438,25 +452,25 @@ ERROR_UNIT_MASK = 0xFFD00000
 
 
 def classify_oob_header(value: int) -> str:
-    """Classifica il primo u32 dell'OOB con le stesse regole del firmware.
+    """Classifies the first OOB u32 by the same rules the firmware uses.
 
-    Il test di ERROR_UNIT e' una maschera, non un confronto: (~v & 0xFFD00000) == 0. Percio'
-    0xFFFFFFFF (pagina cancellata o lettura non correggibile) ricade nello stesso ramo e fa
-    impostare il bit 2 del flag di protect.
+    The ERROR_UNIT test is a mask, not a comparison: (~v & 0xFFD00000) == 0. So 0xFFFFFFFF (an
+    erased page, or an uncorrectable read) falls into the same branch and sets bit 2 of the
+    protect flag.
     """
     if (~value & ERROR_UNIT_MASK & 0xFFFFFFFF) == 0:
-        return "ERROR_UNIT (cancellata)" if value == 0xFFFFFFFF else "ERROR_UNIT"
+        return "ERROR_UNIT (erased)" if value == 0xFFFFFFFF else "ERROR_UNIT"
     if value in PAGE_MAGIC:
         return PAGE_MAGIC[value]
     return f"LBA {value:#x}"
 
 
 def cmd_diag_protect(drive, args) -> None:
-    """Legge le variabili che la scansione di init lascia in RAM. Sola lettura, nessuna scrittura.
+    """Reads the variables the init scan leaves in RAM. Read-only, no writes.
 
-    FUN_60016c4c scorre pagina 0 dei blocchi 0..limite su ogni CE, classifica il primo u32 dell'OOB
-    e registra cosa ha trovato. Leggere queste variabili dice *perche'* il disco e' in protect mode
-    e su quale blocco si e' inceppato, senza bisogno di un loader diagnostico.
+    FUN_60016c4c walks page 0 of blocks 0..limit on every CE, classifies the first OOB u32 and
+    records what it found. Reading these variables tells you *why* the drive is in protect mode and
+    which block it tripped over, with no diagnostic loader needed.
     """
     drive.vuc_system_info()
     identify = drive.cmd_identify_device()
@@ -467,7 +481,7 @@ def cmd_diag_protect(drive, args) -> None:
         if address == 0x5C0CB5F0 and size == 1:
             bits = [text for bit, text in PROTECT_BITS.items() if data[0] >> bit & 1]
             extra = [f"bit{b}" for b in range(4, 8) if data[0] >> b & 1]
-            print(f"    flag = {data[0]:#04x}: " + ("; ".join(bits + extra) or "nessun bit"))
+            print(f"    flag = {data[0]:#04x}: " + ("; ".join(bits + extra) or "no bits set"))
     if not args.sram:
         return
     for address, size, label in DIAG_SRAM:
@@ -478,11 +492,11 @@ def cmd_diag_protect(drive, args) -> None:
 
 
 def cmd_sys_scan(drive, args) -> None:
-    """Rilegge pagina 0 dei blocchi di sistema come fa la scansione di init, e la classifica.
+    """Re-reads page 0 of the system blocks the way the init scan does, and classifies it.
 
-    Serve a trovare la pagina che il firmware interpreta come ERROR_UNIT. Sola lettura.
-    Il modo di lettura conta: un blocco pSLC letto in modo MLC sembra cancellato, cioe' 0xffffffff,
-    che e' esattamente il valore che fa scattare il protect. Per questo va provato in entrambi i modi.
+    This is how you find the page the firmware reads as an ERROR_UNIT. Read-only.
+    The read mode matters: a pSLC block read in MLC mode looks erased, i.e. 0xffffffff, which is
+    exactly the value that trips protect mode. Try both modes.
     """
     info = drive.vuc_system_info()
     out = open(args.out, "w") if args.out else None
@@ -490,12 +504,12 @@ def cmd_sys_scan(drive, args) -> None:
         for block in _parse_range(args.blocks, info.blocks_per_die):
             try:
                 _data, oob = drive.read_page(ce, args.die, block, 0, args.pslc, info)
-            except Exception as exc:  # una pagina illeggibile non deve fermare la scansione
-                line = f"ce {ce} blocco {block:4d}: errore {exc}"
+            except Exception as exc:  # an unreadable page must not stop the scan
+                line = f"ce {ce} block {block:4d}: error {exc}"
             else:
                 value = struct.unpack_from("<I", oob, 0)[0]
                 seq = struct.unpack_from("<I", oob, 4)[0]
-                line = (f"ce {ce} blocco {block:4d}: {value:08x} {classify_oob_header(value):<26}"
+                line = (f"ce {ce} block {block:4d}: {value:08x} {classify_oob_header(value):<26}"
                         f" seq {seq & 0xFFFFFF:#08x} ecc {oob[8]:#04x} ce_id {oob[10]:#04x}")
             print(line, flush=True)
             if out:
@@ -506,16 +520,16 @@ def cmd_sys_scan(drive, args) -> None:
 
 
 def cmd_product_history(drive, args) -> None:
-    """Legge la product history (VUC 0xDA, sola lettura).
+    """Reads the product history (VUC 0xDA, read-only).
 
-    Su questi controller contiene tipicamente i contatori di vita: accensioni, ore, e in particolare
-    le perdite di alimentazione inattese. Serve a decidere la causa prima del guasto.
+    On these controllers it typically holds the lifetime counters: power cycles, hours, and in
+    particular unexpected power losses. Useful for establishing the cause behind the failure.
     """
     from phison_s11 import drive as s11_drive
 
     drive.vuc_system_info()
     data = drive.vuc(s11_drive.VUCFeature.READ_PRODUCT_HISTORY, args.size)
-    print(f"{len(data)} byte")
+    print(f"{len(data)} bytes")
     if args.out:
         pathlib.Path(args.out).write_bytes(data)
     for off in range(0, min(len(data), args.show), 16):
@@ -525,20 +539,20 @@ def cmd_product_history(drive, args) -> None:
 
 
 def cmd_restart(drive, args) -> None:
-    """Soft reset del controller: ricarica le sezioni dalla NAND e rifa la scansione di init.
+    """Soft controller reset: reloads the sections from NAND and re-runs the init scan.
 
-    Volatile, nessuna scrittura NAND. Serve dopo aver cancellato l'error unit: la sospensione S3
-    fa solo un COMRESET, mentre la scansione di `FUN_60016c4c` gira al reset del controller.
+    Volatile, no NAND write. Needed after erasing the error unit: an S3 suspend is only a COMRESET,
+    whereas the `FUN_60016c4c` scan runs on a controller reset.
     """
     drive.vuc_system_info()
     before = drive.vuc_read_register(0x5C0CB5F0, 1)
     ident0 = drive.cmd_identify_device()
-    print(f"prima: flag={before.hex()}, IDENTIFY model={ident0.model!r} firmware={ident0.firmware!r}")
+    print(f"before: flag={before.hex()}, IDENTIFY model={ident0.model!r} firmware={ident0.firmware!r}")
     drive.allow_restart = True
     try:
         drive.vuc_restart()
     except Exception as e:
-        raise SystemExit(f"reset: {e!r} (il controller potrebbe essersi bloccato; recupera con S3+rescan)")
+        raise SystemExit(f"reset: {e!r} (the controller may have hung; recover with S3 + rescan)")
     finally:
         drive.allow_restart = False
     for address, size, label in DIAG_VARS:
@@ -546,89 +560,89 @@ def cmd_restart(drive, args) -> None:
         print(f"{address:#010x} [{size}] {data.hex():<8} {label}")
         if address == 0x5C0CB5F0 and size == 1:
             bits = [text for bit, text in PROTECT_BITS.items() if data[0] >> bit & 1]
-            print(f"    flag = {data[0]:#04x}: " + ("; ".join(bits) or "NESSUN BIT: protect mode spento"))
+            print(f"    flag = {data[0]:#04x}: " + ("; ".join(bits) or "NO BITS SET: protect mode is off"))
     ident = drive.cmd_identify_device()
-    print(f"dopo:  IDENTIFY model={ident.model!r} firmware={ident.firmware!r}")
+    print(f"after:  IDENTIFY model={ident.model!r} firmware={ident.firmware!r}")
 
 
 def cmd_erase_block(drive, args) -> None:
-    """Cancella un blocco NAND. IRREVERSIBILE. Pensato per l'error unit che tiene il disco in protect.
+    """Erases a NAND block. IRREVERSIBLE. Meant for the error unit holding the drive in protect mode.
 
-    Tre interlock prima di scrivere:
-      1. la pagina 0 del blocco deve avere il magic atteso (default: la maschera ERROR_UNIT), letta
-         con lo stesso indirizzamento che usera' l'erase, quindi e' davvero quel blocco;
-      2. deve esistere un backup locale completo del blocco (dati + OOB), passato con --backup;
-      3. serve --yes.
-    Dopo l'erase rilegge la pagina 0 e stampa com'e' rimasta.
+    Three interlocks before anything is written:
+      1. page 0 of the block must carry the expected magic (default: the ERROR_UNIT mask), read
+         through the same addressing the erase will use, so it really is that block;
+      2. a complete local backup of the block must exist (data + OOB), passed with --backup;
+      3. --yes is required.
+    After the erase it re-reads page 0 and prints how it came back.
     """
     info = drive.vuc_system_info()
     data, oob = drive.read_page(args.ce, args.die, args.block, 0, args.pslc, info)
     value = struct.unpack_from("<I", oob, 0)[0]
     kind = classify_oob_header(value)
-    print(f"ce {args.ce} die {args.die} blocco {args.block}: pagina 0 word0 = {value:#010x} ({kind})")
-    scritte = sum(1 for p in range(len(oob) // 512) if oob[p * 512 + 8] != 0xFF)
-    print(f"  pagine con dati in questa lettura della pagina 0: OOB byte8 = {oob[8]:#04x}")
+    print(f"ce {args.ce} die {args.die} block {args.block}: page 0 word0 = {value:#010x} ({kind})")
+    print(f"  page 0 of this read: OOB byte8 = {oob[8]:#04x}")
 
     if args.expect == "error-unit":
         if (~value & ERROR_UNIT_MASK & 0xFFFFFFFF) != 0:
-            raise SystemExit(f"INTERLOCK 1: la pagina 0 non e' un ERROR_UNIT ({value:#010x}), nessun erase")
-    elif args.expect != "qualsiasi":
+            raise SystemExit(f"INTERLOCK 1: page 0 is not an ERROR_UNIT ({value:#010x}), nothing erased")
+    elif args.expect != "any":
         if value != int(args.expect, 0):
-            raise SystemExit(f"INTERLOCK 1: word0 {value:#010x} != {args.expect}, nessun erase")
+            raise SystemExit(f"INTERLOCK 1: word0 {value:#010x} != {args.expect}, nothing erased")
 
     backup = pathlib.Path(args.backup)
     bo = backup.with_suffix(".oob")
     if not (backup.exists() and bo.exists()):
-        raise SystemExit(f"INTERLOCK 2: backup mancante ({backup} / {bo}), nessun erase")
+        raise SystemExit(f"INTERLOCK 2: backup missing ({backup} / {bo}), nothing erased")
     saved = bo.read_bytes()
     if struct.unpack_from("<I", saved, 0)[0] != value:
-        raise SystemExit("INTERLOCK 2: il backup non corrisponde a questo blocco, nessun erase")
-    print(f"  backup: {backup} ({backup.stat().st_size} B) + OOB ({len(saved)} B), word0 coincide")
+        raise SystemExit("INTERLOCK 2: the backup does not match this block, nothing erased")
+    print(f"  backup: {backup} ({backup.stat().st_size} B) + OOB ({len(saved)} B), word0 matches")
 
     if not args.yes:
-        raise SystemExit("manca --yes: nessun erase eseguito")
+        raise SystemExit("--yes missing: nothing erased")
 
     drive.allow_erase = True
     try:
         drive.vuc_erase_flash(args.ce, args.die, args.block, args.pslc, info)
     finally:
         drive.allow_erase = False
-    print("  ERASE eseguito")
+    print("  ERASE done")
 
     _data, oob2 = drive.read_page(args.ce, args.die, args.block, 0, args.pslc, info)
     v2 = struct.unpack_from("<I", oob2, 0)[0]
-    print(f"  dopo: word0 = {v2:#010x} ({classify_oob_header(v2)}), OOB byte8 = {oob2[8]:#04x}")
-    print(f"  OOB pagina 0: {oob2[:16].hex()}")
+    print(f"  after: word0 = {v2:#010x} ({classify_oob_header(v2)}), OOB byte8 = {oob2[8]:#04x}")
+    print(f"  page 0 OOB: {oob2[:16].hex()}")
 
 
 def cmd_clear_protect(drive, args) -> None:
-    """Azzera in RAM il flag di protect mode (0x5C0CB5F0). Scrittura volatile nel controller, nessuna NAND.
+    """Zeroes the protect-mode flag in RAM (0x5C0CB5F0). A volatile write to the controller, no NAND.
 
-    Test diagnostico: se dopo IDENTIFY riporta il modello normale e `dd if=/dev/sdX` legge dati reali,
-    la FTL era gia' montata; se legge zeri, serve ri-eseguire il boot.
+    A diagnostic test: if IDENTIFY then reports the normal model and `dd if=/dev/sdX` reads real
+    data, the FTL was already mounted; if it reads zeros, the boot has to be re-run.
     """
     PROTECT_FLAG_ADDR = 0x5C0CB5F0
     drive.vuc_system_info()
     before = drive.cmd_identify_device()
     cur = drive.vuc_read_register(PROTECT_FLAG_ADDR, 1)
-    print(f"prima: IDENTIFY model={before.model!r} firmware={before.firmware!r}; flag={cur.hex()}")
+    print(f"before: IDENTIFY model={before.model!r} firmware={before.firmware!r}; flag={cur.hex()}")
     if not args.yes:
-        raise SystemExit("manca --yes: nessuna scrittura eseguita")
+        raise SystemExit("--yes missing: nothing written")
     drive.allow_write_register = True
     drive.vuc_write_register(PROTECT_FLAG_ADDR, b"\x00")
     drive.allow_write_register = False
     now = drive.vuc_read_register(PROTECT_FLAG_ADDR, 1)
     after = drive.cmd_identify_device()
-    print(f"dopo:  IDENTIFY model={after.model!r} firmware={after.firmware!r}; flag={now.hex()}")
+    print(f"after:  IDENTIFY model={after.model!r} firmware={after.firmware!r}; flag={now.hex()}")
 
 
 def cmd_probe_reset_patch(drive, args) -> None:
-    """Patcha in RAM l'istruzione che imposta il protect (0x60017003) e verifica se sopravvive a un reset.
+    """Patches the instruction that sets protect mode (0x60017003) in RAM and tests whether it
+    survives a reset.
 
-    Originale: s8i a9,a10,0 (92 4a 00) scrive flag|4. Patch: or a9,a9,a9 (90 99 20) = no-op.
-    Scrittura volatile nella SRAM del controller, nessuna NAND. Con --restart fa un soft reset e
-    rilegge: se i byte restano patchati la RAM sopravvive al reset (via in-place praticabile); se
-    tornano originali il reset ricarica dalla NAND (serve ROM mode).
+    Original: s8i a9,a10,0 (92 4a 00) writes flag|4. Patch: or a9,a9,a9 (90 99 20) = no-op.
+    A volatile write to controller SRAM, no NAND. With --restart it performs a soft reset and
+    re-reads: if the bytes stay patched, RAM survives the reset (an in-place route is viable); if
+    they revert, the reset reloads from NAND (ROM mode would be needed).
     """
     ADDR = 0x60017003
     ORIG = bytes.fromhex("924a00")
@@ -636,45 +650,45 @@ def cmd_probe_reset_patch(drive, args) -> None:
     FLAG = 0x5C0CB5F0
     drive.vuc_system_info()
     cur = drive.vuc_read_register(ADDR, 3)
-    print(f"istruzione a {ADDR:#x}: {cur.hex()} ({'originale' if cur == ORIG else 'gia patchata' if cur == PATCH else 'ALTRO'})")
+    print(f"instruction at {ADDR:#x}: {cur.hex()} ({'original' if cur == ORIG else 'already patched' if cur == PATCH else 'SOMETHING ELSE'})")
     if cur not in (ORIG, PATCH):
-        raise SystemExit("i byte non corrispondono a quelli attesi: non tocco niente")
+        raise SystemExit("the bytes do not match what was expected: touching nothing")
     if not args.yes:
-        raise SystemExit("manca --yes: nessuna scrittura eseguita")
+        raise SystemExit("--yes missing: nothing written")
     drive.allow_write_register = True
-    # WRITE_REGISTER scrive parole da 4 byte allineate: patch via read-modify-write sulle due parole coinvolte
+    # WRITE_REGISTER writes aligned 4-byte words: patch by read-modify-write over the two words involved
     base = ADDR & ~3  # 0x60017000
-    span = bytearray(drive.vuc_read_register(base, 8))  # copre 0x60017000..0x60017007
+    span = bytearray(drive.vuc_read_register(base, 8))  # covers 0x60017000..0x60017007
     off = ADDR - base  # 3
     span[off : off + 3] = PATCH
     drive.vuc_write_register(base, bytes(span[0:4]))
     drive.vuc_write_register(base + 4, bytes(span[4:8]))
     back = drive.vuc_read_register(ADDR, 3)
-    print(f"dopo patch: {back.hex()} ({'ok' if back == PATCH else 'SCRITTURA FALLITA'})")
+    print(f"after patch: {back.hex()} ({'ok' if back == PATCH else 'WRITE FAILED'})")
     drive.allow_write_register = False
     if back != PATCH:
-        raise SystemExit("la scrittura in SRAM non ha attecchito: WRITE_REGISTER non raggiunge questa zona")
+        raise SystemExit("the SRAM write did not take: WRITE_REGISTER does not reach this region")
     if not args.restart:
-        print("patch applicata in RAM; senza --restart non resetto")
+        print("patch applied in RAM; without --restart no reset is performed")
         return
-    print("eseguo soft reset...")
+    print("performing a soft reset...")
     drive.allow_restart = True
     try:
         drive.vuc_restart()
     except Exception as e:
         drive.allow_restart = False
-        raise SystemExit(f"reset: {e!r} (il controller potrebbe essersi bloccato; recupera con S3+rescan)")
+        raise SystemExit(f"reset: {e!r} (the controller may have hung; recover with S3 + rescan)")
     drive.allow_restart = False
     after = drive.vuc_read_register(ADDR, 3)
     flag = drive.vuc_read_register(FLAG, 1)
     ident = drive.cmd_identify_device()
-    sopravv = after == PATCH
-    print(f"dopo reset: istruzione {after.hex()} -> RAM {'SOPRAVVISSUTA' if sopravv else 'ricaricata da NAND'}")
-    print(f"            flag protect={flag.hex()}, IDENTIFY model={ident.model!r} firmware={ident.firmware!r}")
+    survived = after == PATCH
+    print(f"after reset: instruction {after.hex()} -> RAM {'SURVIVED' if survived else 'reloaded from NAND'}")
+    print(f"             protect flag={flag.hex()}, IDENTIFY model={ident.model!r} firmware={ident.firmware!r}")
 
 
 def cmd_read_firmware(drive, args) -> None:
-    """Estrae il firmware installato (example/read_firmware.py di Psychite): SEND_SEED + VERIFY_FLASH."""
+    """Extracts the installed firmware (Psychite's example/read_firmware.py): SEND_SEED + VERIFY_FLASH."""
     import importlib.util
 
     from phison_s11 import drive as s11_drive
@@ -687,7 +701,7 @@ def cmd_read_firmware(drive, args) -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if args.raw:
-        # dati grezzi, prima di qualunque interpretazione: header di flash + sezioni come restituite dal disco
+        # raw data, before any interpretation: flash header + sections exactly as the drive returns them
         from phison_s11 import firmware as s11_firmware
 
         seed = s11_firmware.Seed()
@@ -701,17 +715,17 @@ def cmd_read_firmware(drive, args) -> None:
             while len(data) < section.size:
                 data += drive.vuc(s11_drive.VUCFeature.VERIFY_FLASH, min(section.size - len(data), 0x10000), 1 << 16)
             pathlib.Path(f"{args.out}.sec{i}").write_bytes(data)
-            print(f"sezione {i}: {section} -> {len(data)} byte")
+            print(f"section {i}: {section} -> {len(data)} bytes")
         return
     firmware = module.read_firmware(drive)
     data = bytes(firmware)
     pathlib.Path(args.out).write_bytes(data)
     print(f"firmware: {firmware}")
-    print(f"salvato {args.out}: {len(data)} byte")
+    print(f"saved {args.out}: {len(data)} bytes")
 
 
 def cmd_update_firmware(drive, args) -> None:
-    """DOWNLOAD MICROCODE segmentato di un solo file, verificato per SHA-256 e con Psychite. Scrive sul disco."""
+    """Segmented DOWNLOAD MICROCODE of a single file, checked by SHA-256 and by Psychite. Writes to the drive."""
     import hashlib
 
     from phison_s11 import firmware as s11_firmware
@@ -719,32 +733,32 @@ def cmd_update_firmware(drive, args) -> None:
     data = pathlib.Path(args.firmware).read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     if digest != args.sha256:
-        raise SystemExit(f"SHA-256 {digest} diverso da quello atteso")
-    firmware = s11_firmware.Firmware.from_bytes(data)  # verifica struttura e CRC delle sezioni
+        raise SystemExit(f"SHA-256 {digest} does not match the expected one")
+    firmware = s11_firmware.Firmware.from_bytes(data)  # checks the structure and the section CRCs
     info = drive.vuc_system_info()
-    print(f"prima: {drive.cmd_identify_device().firmware}, protected_mode {info.protected_mode}")
-    print(f"carico: {firmware.version} {firmware.date}")
+    print(f"before: {drive.cmd_identify_device().firmware}, protected_mode {info.protected_mode}")
+    print(f"loading: {firmware.version} {firmware.date}")
     if not args.yes:
-        raise SystemExit("manca --yes: nessuna scrittura eseguita")
+        raise SystemExit("--yes missing: nothing written")
     drive.allow_dlmc_data = data
     drive.cmd_download_microcode_segmented(data)
     drive.allow_dlmc_data = None
-    print(f"dopo: IDENTIFY firmware {drive.cmd_identify_device().firmware}")
+    print(f"after: IDENTIFY firmware {drive.cmd_identify_device().firmware}")
 
 
 def cmd_engineering(drive, args) -> None:
-    """DOWNLOAD MICROCODE modo 7 con il solo header engineering (Psychite: cambia modalità, non scrive firmware)."""
+    """DOWNLOAD MICROCODE mode 7 with only the engineering header (per Psychite: changes mode, writes no firmware)."""
     from phison_s11 import firmware as s11_firmware
 
     before = drive.vuc_system_info()
-    print(f"prima: vuc_mode {before.vuc_mode}, protected_mode {before.protected_mode}")
+    print(f"before: vuc_mode {before.vuc_mode}, protected_mode {before.protected_mode}")
     if not args.yes:
-        raise SystemExit("manca --yes: nessun comando inviato")
+        raise SystemExit("--yes missing: no command sent")
     drive.allow_engineering_dlmc = True
     drive.cmd_download_microcode_full(bytes(s11_firmware.Header(engineering_mode=True)))
     drive.allow_engineering_dlmc = False
     after = drive.vuc_system_info()
-    print(f"dopo: vuc_mode {after.vuc_mode}, protected_mode {after.protected_mode}, IDENTIFY {drive.cmd_identify_device().firmware}")
+    print(f"after: vuc_mode {after.vuc_mode}, protected_mode {after.protected_mode}, IDENTIFY {drive.cmd_identify_device().firmware}")
 
 
 def cmd_unlock(drive, args) -> None:
@@ -762,18 +776,20 @@ def cmd_read_page(drive, args) -> None:
     if args.out:
         pathlib.Path(args.out).write_bytes(data)
         pathlib.Path(args.out + ".oob").write_bytes(oob)
-    print(f"dati {len(data)} B, OOB: {oob[:32].hex()}")
+    print(f"data {len(data)} B, OOB: {oob[:32].hex()}")
 
 
 def cmd_dump(drive, args) -> None:
     info = drive.vuc_system_info()
-    # piano (file o -): "skip ce die block", "skippage ce die block page", "only ce die block"
+    # plan (a file, or -): "skip ce die block", "skippage ce die block page", "only ce die block"
     skip: set[tuple[int, int, int]] = set()
     skip_pages: set[tuple[int, int, int, int]] = set()
     only: list[tuple[int, int, int]] = []
     if args.plan:
         src = sys.stdin if args.plan == "-" else open(args.plan)
         for line in src:
+            # TODO: malformed numbers in the plan surface as an int() traceback rather than a message
+            # naming the line. dump_runner writes the plan, but it also gets edited by hand.
             kind, *nums = line.split() or [""]
             if kind == "skip":
                 skip.add(tuple(map(int, nums)))
@@ -782,7 +798,7 @@ def cmd_dump(drive, args) -> None:
             elif kind == "only":
                 only.append(tuple(map(int, nums)))
             elif kind:
-                raise SystemExit(f"riga di piano non valida: {line!r}")
+                raise SystemExit(f"invalid plan line: {line!r}")
     out = sys.stdout.buffer if args.out == "-" else open(args.out, "ab")
     flags = FLAG_PSLC if args.pslc else 0
     pages = _parse_range(args.pages, info.pages_per_block)
@@ -804,7 +820,7 @@ def cmd_dump(drive, args) -> None:
         for page in pages:
             fatal = False
             if (ce, die, block, page) in skip_pages:
-                data, oob, status = b"saltata: aveva bloccato il controller", b"", STATUS_SKIPPED
+                data, oob, status = b"skipped: it had hung the controller", b"", STATUS_SKIPPED
             else:
                 try:
                     data, oob = drive.read_page(ce, die, block, page, args.pslc, info)
@@ -815,8 +831,8 @@ def cmd_dump(drive, args) -> None:
                 except OSError as e:
                     data, oob, status = repr(e).encode(), b"", STATUS_ERROR
                     consecutive_errors += 1
-                    # solo l'errore ATA (es. ECC non correggibile) è tollerato; timeout, ABORTED_COMMAND
-                    # o errori SG_IO vogliono dire controller bloccato: ogni altro comando peggiora le cose
+                    # only an ATA error (uncorrectable ECC, say) is tolerated; a timeout, ABORTED_COMMAND
+                    # or an SG_IO error means the controller has hung, and any further command makes it worse
                     fatal = "ATA command failed" not in str(e)
             out.write(PAGE_HEADER.pack(MAGIC_PAGE, ce, die, block, page, flags, status, len(data), len(oob)))
             out.write(data)
@@ -824,13 +840,14 @@ def cmd_dump(drive, args) -> None:
             n_pages += 1
             if fatal or consecutive_errors >= args.max_errors:
                 out.flush()
-                # riga per dump_runner.py
+                # line parsed by dump_runner.py
                 print(f"FATAL {ce} {die} {block} {page}", file=sys.stderr)
-                raise SystemExit(f"mi fermo a ce {ce} die {die} blocco {block} pagina {page}: {data.decode()}")
+                raise SystemExit(f"stopping at ce {ce} die {die} block {block} page {page}: {data.decode()}")
         out.write(BLOCK_DONE.pack(MAGIC_BLOCK, ce, die, block))
         out.flush()
         rate = n_pages / max(time.monotonic() - t0, 1e-6)
-        print(f"blocco ce {ce} die {die} {block} ok, {rate:.1f} pagine/s", file=sys.stderr)
+        # NOTE: dump_runner.py matches this line by its "block " prefix; keep both ends in step
+        print(f"block ce {ce} die {die} {block} ok, {rate:.1f} pages/s", file=sys.stderr)
     out.write(MAGIC_END)
     out.flush()
 
@@ -846,7 +863,12 @@ def _read_exact(stream: BinaryIO, size: int) -> bytes:
 
 
 def cmd_receive(args) -> None:
-    """Riceve lo stream di dump: un file .data/.oob per blocco, errori in .err, blocchi completi in manifest."""
+    """Receives the dump stream: one .data/.oob file per block, errors in .err, complete blocks in the manifest."""
+    # TODO: the .part files are opened "wb" and os.replace promotes them at end of block. A second pass
+    # over an already complete block, with a narrower page range, therefore replaces the complete file
+    # with a partial one: silent loss. It does not happen in the normal flow, because dump_runner works
+    # whole blocks and skips those in the manifest, but by hand it is one keystroke on a 105 GB dump.
+    # Overwriting a block already in the manifest should be refused unless an explicit flag is given.
     outdir = pathlib.Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     manifest = open(outdir / "manifest.txt", "a")
@@ -870,10 +892,10 @@ def cmd_receive(args) -> None:
         try:
             magic = _read_exact(stream, 4)
         except EOFError:
-            print("stream interrotto (blocco in corso scartato)", file=sys.stderr)
+            print("stream interrupted (the block in progress is discarded)", file=sys.stderr)
             break
         if magic == MAGIC_END:
-            print("fine stream", file=sys.stderr)
+            print("end of stream", file=sys.stderr)
             break
         if magic == MAGIC_PAGE:
             _, ce, die, block, page, flags, status, dlen, olen = PAGE_HEADER.unpack(
@@ -882,7 +904,7 @@ def cmd_receive(args) -> None:
             data = _read_exact(stream, dlen)
             oob = _read_exact(stream, olen)
             _, fdata, foob, ferr = files(ce, die, block)
-            if status == STATUS_OK:  # errori e pagine saltate restano a zero e finiscono in .err
+            if status == STATUS_OK:  # errors and skipped pages stay zero and go to .err
                 fdata.seek(page * dlen)
                 fdata.write(data)
                 foob.seek(page * SECTOR_SIZE)
@@ -900,7 +922,7 @@ def cmd_receive(args) -> None:
             manifest.write(f"{ce} {die} {block}\n")
             manifest.flush()
         else:
-            raise SystemExit(f"stream corrotto: magic {magic!r}")
+            raise SystemExit(f"corrupt stream: magic {magic!r}")
 
 
 def cmd_done_list(args) -> None:
@@ -911,9 +933,9 @@ def cmd_done_list(args) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("drive", help="dispositivo /dev/sgX (ignorato da receive/done-list: usare -)")
-    p.add_argument("--log", default="safe_s11.log", help="log JSONL di ogni comando ATA")
-    p.add_argument("--log-errors-only", action="store_true", help="registra solo errori e comandi bloccati")
+    p.add_argument("drive", help="the /dev/sgX device (ignored by receive/done-list: pass -)")
+    p.add_argument("--log", default="safe_s11.log", help="JSONL log of every ATA command")
+    p.add_argument("--log-errors-only", action="store_true", help="log only failures and blocked commands")
     sub = p.add_subparsers(dest="action", required=True)
 
     sub.add_parser("identify")
@@ -924,8 +946,8 @@ def main() -> None:
     sub.add_parser("flash-id")
     s = sub.add_parser("block-map")
     s.add_argument("--out")
-    s = sub.add_parser("unlock", help="sequenza di unlock VUC (scrive registri di stato del controller)")
-    s.add_argument("--allow-engineering-dlmc", action="store_true", help="ammette DLMC con il solo header engineering")
+    s = sub.add_parser("unlock", help="the VUC unlock sequence (writes controller status registers)")
+    s.add_argument("--allow-engineering-dlmc", action="store_true", help="also permit DLMC with the engineering header alone")
     s = sub.add_parser("read-sram")
     s.add_argument("address", type=lambda x: int(x, 0))
     s.add_argument("size", type=lambda x: int(x, 0))
@@ -937,42 +959,42 @@ def main() -> None:
     s.add_argument("page", type=int)
     s.add_argument("--pslc", action="store_true")
     s.add_argument("--out")
-    s = sub.add_parser("diag-protect", help="legge le variabili di diagnosi della scansione di init (sola lettura)")
-    s.add_argument("--sram", action="store_true", help="legge anche gli array e il buffer OOB in SRAM")
-    s = sub.add_parser("sys-scan", help="riclassifica pagina 0 dei blocchi di sistema come fa l'init (sola lettura)")
+    s = sub.add_parser("diag-protect", help="read the init scan's diagnostic variables (read-only)")
+    s.add_argument("--sram", action="store_true", help="also read the arrays and the OOB buffer in SRAM")
+    s = sub.add_parser("sys-scan", help="re-classify page 0 of the system blocks as init does (read-only)")
     s.add_argument("--ce", default="all")
     s.add_argument("--die", type=int, default=0)
     s.add_argument("--blocks", default="0-99")
     s.add_argument("--pslc", action="store_true")
     s.add_argument("--out")
-    s = sub.add_parser("product-history", help="legge la product history del controller (sola lettura)")
+    s = sub.add_parser("product-history", help="read the controller's product history (read-only)")
     s.add_argument("--size", type=lambda x: int(x, 0), default=512)
     s.add_argument("--show", type=lambda x: int(x, 0), default=256)
     s.add_argument("--out")
-    sub.add_parser("restart", help="soft reset del controller: ricarica dalla NAND e rifa l'init (volatile)")
-    s = sub.add_parser("erase-block", help="CANCELLA un blocco NAND (irreversibile); pensato per l'error unit")
+    sub.add_parser("restart", help="soft controller reset: reload from NAND and re-run init (volatile)")
+    s = sub.add_parser("erase-block", help="ERASES a NAND block (irreversible); meant for the error unit")
     s.add_argument("--ce", type=int, required=True)
     s.add_argument("--die", type=int, default=0)
     s.add_argument("--block", type=int, required=True)
     s.add_argument("--pslc", action="store_true")
     s.add_argument("--expect", default="error-unit",
-                   help="magic atteso nella pagina 0: 'error-unit' (default), 'qualsiasi', o un valore tipo 0xffd00000")
-    s.add_argument("--backup", required=True, help="file .data del backup locale del blocco (serve anche il .oob)")
+                   help="magic required in page 0: 'error-unit' (default), 'any', or a value like 0xffd00000")
+    s.add_argument("--backup", required=True, help="the block's local .data backup (the matching .oob must exist too)")
     s.add_argument("--yes", action="store_true")
-    s = sub.add_parser("clear-protect", help="azzera in RAM il flag di protect (scrittura volatile nel controller)")
+    s = sub.add_parser("clear-protect", help="zero the protect flag in RAM (volatile write to the controller)")
     s.add_argument("--yes", action="store_true")
-    s = sub.add_parser("probe-reset-patch", help="patcha in RAM la set-protect e testa se sopravvive a un reset")
+    s = sub.add_parser("probe-reset-patch", help="patch the set-protect store in RAM and test whether it survives a reset")
     s.add_argument("--yes", action="store_true")
-    s.add_argument("--restart", action="store_true", help="dopo la patch esegue un soft reset e rilegge")
-    s = sub.add_parser("read-firmware", help="estrae il firmware installato (abilita SEND_SEED e VERIFY_FLASH)")
+    s.add_argument("--restart", action="store_true", help="after patching, perform a soft reset and re-read")
+    s = sub.add_parser("read-firmware", help="extract the installed firmware (enables SEND_SEED and VERIFY_FLASH)")
     s.add_argument("--out", required=True)
     s.add_argument("--psychite-example", default="/run/live/medium/live/psychite/example")
-    s.add_argument("--raw", action="store_true", help="salva header e sezioni grezzi senza interpretarli")
-    s = sub.add_parser("update-firmware", help="DOWNLOAD MICROCODE segmentato (SCRIVE sul disco)")
+    s.add_argument("--raw", action="store_true", help="save the header and sections raw, without interpreting them")
+    s = sub.add_parser("update-firmware", help="segmented DOWNLOAD MICROCODE (WRITES to the drive)")
     s.add_argument("firmware")
     s.add_argument("--sha256", required=True)
     s.add_argument("--yes", action="store_true")
-    s = sub.add_parser("engineering", help="header engineering via DOWNLOAD MICROCODE (nessun firmware scritto)")
+    s = sub.add_parser("engineering", help="engineering header via DOWNLOAD MICROCODE (no firmware written)")
     s.add_argument("--yes", action="store_true")
     s = sub.add_parser("read-page")
     for name in ("ce", "die", "block", "page"):
@@ -982,12 +1004,12 @@ def main() -> None:
     s = sub.add_parser("dump")
     s.add_argument("--ce", default="all")
     s.add_argument("--die", default="all")
-    s.add_argument("--blocks", default="all", help="es. 0-99,200")
-    s.add_argument("--pages", default="all", help="es. 0 oppure 0-1023")
+    s.add_argument("--blocks", default="all", help="e.g. 0-99,200")
+    s.add_argument("--pages", default="all", help="e.g. 0, or 0-1023")
     s.add_argument("--pslc", action="store_true")
-    s.add_argument("--plan", help="file (o -) con righe 'skip|only ce die block' e 'skippage ce die block page'")
-    s.add_argument("--max-errors", type=int, default=3, help="errori ATA (ECC) consecutivi prima di fermarsi")
-    s.add_argument("--out", required=True, help="file o - per stdout")
+    s.add_argument("--plan", help="a file (or -) of 'skip|only ce die block' and 'skippage ce die block page' lines")
+    s.add_argument("--max-errors", type=int, default=3, help="consecutive ATA (ECC) errors before giving up")
+    s.add_argument("--out", required=True, help="output file, or - for stdout")
     s = sub.add_parser("receive")
     s.add_argument("outdir")
     s = sub.add_parser("done-list")
@@ -1025,7 +1047,7 @@ def main() -> None:
     try:
         handlers[args.action](drive, args)
     except Blocked as e:
-        raise SystemExit(f"BLOCCATO: {e}")
+        raise SystemExit(f"BLOCKED: {e}")
     finally:
         drive.close()
 

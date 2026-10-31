@@ -143,7 +143,7 @@ safe_dump.py /dev/sgX erase-block --ce CE --block N --backup FILE.data --yes
 | `--block` | required | **physical** block number |
 | `--die` | `0` | die index |
 | `--pslc` | off | pSLC mode. The system area is pSLC: for an error unit you almost certainly want this |
-| `--expect` | `error-unit` | magic required in page 0. Accepts `qualsiasi` (any) or a literal like `0xffd00000`. **Changing this disables interlock 1** |
+| `--expect` | `error-unit` | magic required in page 0. Accepts `any`, or a literal like `0xffd00000`. **Changing this disables interlock 1** |
 | `--backup` | required | the block's `.data` backup; the matching `.oob` must sit beside it |
 | `--yes` | off | without it the tool stops after reporting what it would do |
 
@@ -273,8 +273,18 @@ analyzeHeadless PROJ NAME -import sec0.bin -scriptPath ghidra/scripts \
 
 ---
 
-## A note on language
+## Known defects
 
-The tools' own `--help` text and inline comments are in Italian, from how the work was
-done; the documents are in English. The parameter names and behaviour are what this page
-describes either way.
+The tools carry their known defects as `TODO` comments in the source, rather than in a
+list that drifts out of date:
+
+```sh
+grep -rn TODO tools/
+```
+
+At the time of writing there are ten, the three worth knowing before you run anything:
+the segmented-`DOWNLOAD MICROCODE` allowlist compares bytes with a substring search rather
+than by position; the `allow_*` privilege flags are raised and lowered without
+`try/finally` in five commands, so an exception leaves the filter more permissive than it
+should be; and `receive` will replace a complete block file with a partial one if the same
+block is dumped twice with different page ranges.
