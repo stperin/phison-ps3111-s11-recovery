@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# never commit dumps, images or decompiler output
+data/
+*.img
+*.bin
+*.oob
+decompiled/
