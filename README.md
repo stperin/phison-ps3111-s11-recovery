@@ -73,6 +73,17 @@ entry marks a partial frame. Across 263 sampled versions, a frame with that bit 
 *never* contained the full 4 KB of its declared LBA. Reading those frames as if they
 did produces high-entropy nonsense — which is easy to mistake for encryption.
 
+**Where a partial frame's data belongs.** It holds a contiguous run of sectors, the
+tail of its 4 KB unit, at offset 0 of the frame:
+
+```
+n     = run length of the bits equal to bit 0 of byte 9, starting at bit 0
+shift = 8 - n
+frame[0 .. n*512) == device sectors [LBA + shift, LBA + 8)
+```
+
+Verified against the repaired device by content hash: 60 of 60, 100%.
+
 ## Tools
 
 All of these wrap [Psychite](https://github.com/trulycrisp/psychite) and need it

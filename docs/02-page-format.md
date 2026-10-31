@@ -137,9 +137,32 @@ That rule explains 90% of frames with fill. It fails on non-contiguous or offset
 rule is incomplete or the fill detector over-counts when real `0x78` bytes end the
 payload.
 
-**What is still unknown:** which sectors of which LBA a partial frame actually carries.
-Byte 10 is presumably part of that answer. Until it is decoded, those frames cannot be
-placed into a reconstructed image.
+### Where the payload belongs: solved
+
+A partial frame holds a **contiguous run of sectors, the tail of its 4 KB unit**, placed
+at offset 0 of the frame:
+
+```
+n     = run length of the bits equal to bit 0 of byte 9, starting at bit 0
+shift = 8 - n
+frame[0 .. n*512) == device sectors [LBA + shift, LBA + 8)
+rest of the frame = 0x78 fill
+```
+
+Verified by locating each frame sector on the repaired device by content hash: **60 of
+60 frames with located sectors**, 100%. In 96% of frames every located sector shared a
+single consistent shift, confirming the run is contiguous.
+
+`byte10 & 0x0F` encodes the same sector count and agrees 58 of 60 times; where the two
+disagree, byte 9 is correct. Use byte 9.
+
+Worked example: LBA 56109936, byte 9 `0xc0` (`11000000`), so bit 0 = 0, run of zeros
+= 6, shift = 2. Frame positions k = 0..7 were found at device sectors 56109938..56109945,
+i.e. `LBA + 2 + k`, exactly as predicted.
+
+**Still unknown:** the remaining bits of byte 10, and the masks that are neither a
+leading nor a trailing run (`0x38`, `0x70`, `0x83`, `0x78`), where the run rule gives a
+length inconsistent with the observed fill.
 
 ## Why partial frames look like encryption
 

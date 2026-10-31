@@ -89,6 +89,11 @@ Version ordering by `(sequence, physical page index)`, restricted to complete fr
 picks the correct version **42%** of the time. That is an open problem, bounded anyway
 by what is present.
 
+Partial-frame placement, by contrast, **is now solved** (see
+[page format](02-page-format.md)) — and it was solved by the same method that solved
+everything else: not by analysing the frames, but by locating their sectors on a known
+device by content hash, then reading the rule off the result.
+
 **23% of live clusters are not in the dump at all** — consistent with the 26 ground-truth
 LBAs whose content was found nowhere, after searching all 8768 block files. This is
 unexplained.
