@@ -107,7 +107,7 @@ Firmware Revision:  SBFM21W1</code></pre>
 
 <p>It is this: a byte at address <code>0x5C0CB5F0</code> in the controller's RAM. If that byte is non-zero, the firmware's <code>IDENTIFY</code> handler reports <code>SATAFIRM S11</code> instead of the real model. The byte was <code>0x04</code> — <mark>one bit set</mark> — and the bit was set at every boot by the firmware's own startup scan, which had found one bad page in the system area and remembered it. Erasing the block that held that page ended the condition permanently. The drive came back as <code>SPCC M.2 SSD</code> / <code>SBFM21.1</code>, mounted its NTFS volume, and a full image taken from it boots Windows to the desktop.</p>
 
-<p>Getting there took three weeks, two serious wrong turns, and a 105&nbsp;GB raw dump that I did not end up needing. The wrong turns are the interesting part, so they are in here too.</p>
+<p>Getting there took two serious wrong turns and a 105&nbsp;GB raw dump that I did not end up needing. The wrong turns are the interesting part, so they are in here too.</p>
 
 <h2>Standing on Psychite</h2>
 
@@ -285,7 +285,7 @@ frame[0 .. n*512) == device sectors [LBA + shift, LBA + 8)</code></pre>
 
 <p>Verified against the repaired drive by content hash: 60 of 60.</p>
 
-<p>Three weeks of statistics, settled in an afternoon by having one known-good copy of the thing. That is the transferable lesson of this whole project, and it is embarrassingly simple: <strong>every high-value result came from checking an assumption against something already known</strong> — the read mode against the OOB page index, the ÷4 factor against a RAM variable, the partial-frame flag against the repaired drive. <strong>Every dead end came from looking for structure in statistics with no reference.</strong></p>
+<p>Every statistical dead end above was settled in a single afternoon, by having one known-good copy of the thing. That is the transferable lesson of this whole project, and it is embarrassingly simple: <strong>every high-value result came from checking an assumption against something already known</strong> — the read mode against the OOB page index, the ÷4 factor against a RAM variable, the partial-frame flag against the repaired drive. <strong>Every dead end came from looking for structure in statistics with no reference.</strong></p>
 
 <h2>The repair</h2>
 
