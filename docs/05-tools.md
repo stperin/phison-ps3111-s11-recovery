@@ -3,8 +3,10 @@
 Every parameter of every tool, with what it does and when you want it. For the method
 behind them see the other documents; this one is the manual.
 
-All Python tools target 3.9+ and have no dependencies beyond the standard library and,
-for `safe_dump.py` and `dump_runner.py`, [Psychite](https://github.com/trulycrisp/psychite).
+All Python tools need **3.10 or newer** — `safe_dump.py` annotates two attributes with
+`bytes | None`, and an annotation on an attribute target is evaluated at runtime — and
+have no dependency beyond the standard library and, for `safe_dump.py` and
+`dump_runner.py`, [Psychite](https://github.com/trulycrisp/psychite).
 
 ## Conventions
 
